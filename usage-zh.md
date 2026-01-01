@@ -35,7 +35,7 @@
 | `Schema`   | 用户自定义结构体                 | 已注册结构体                      |
 | `Default`  | 默认协议，占位符                 | 所有未指定类型                     |
 
-> 注：容器的 `Fixed<0>` 表示空容器，在默认 Serializer 中表现为不读出、不写入。
+> 容器的 `Fixed<0>` 表示空容器，在默认 Serializer 中表现为不读出、不写入。
 
 ### 2.2 默认协议映射
 
@@ -57,7 +57,7 @@
 | struct T（已注册 Schema）   | Schema  |
 | 其它                     | Default |
 
-> Default 最终由 `DefaultProtocol_t<T>` 映射到具体协议。你也可以自定义 `Default` 协议下 `Serializer` 实现，跳过映射。
+> Default 最终由 `DefaultProtocol_t<T>` 映射到具体协议，也可自定义 Default 协议下的 Serializer 实现。
 
 ### 2.3 `Serializer<T, Protocol>`
 
@@ -246,7 +246,7 @@ std::cout << arr.value[0].value[1].value[2]; // 更安全的用法
 > ```c++
 > void f(int&);
 > void f(types::PVal<int, proto::Fixed<16>>&);
-> 
+>
 > types::PVal<int, Fixed<16>> x;
 > f(x); // 可能调用 f(int&) 而非 f(PVal<...>&)
 > ```
@@ -279,32 +279,46 @@ BSP_REGISTER_STRUCT(Rect,
 * `BSP_FIELD` 默认使用 `DefaultProtocol_t<T>`
 * `BSP_FIELD_WITH` 可自定义协议
 
-> ⚠ clangd 报红示例：
->
+> ⚠ 在使用宏注册 Schema 时，Clangd 可能会报如下红色提示：
 > ```
 > Clangd: In template: static assertion failed due to requirement '!std::is_same_v<bsp::proto::Default, bsp::proto::Default>': No concrete DefaultProtocol for this type
 > ```
+> 该提示**并不会**影响正常编译运行。
 >
-> 原因：宏生成 Schema 特化，但 `DefaultProtocol<T>` 偏特化通过 concept 触发，clangd 静态分析器误判。
-> **解决办法**：
+> **原因：**
+> 1. **宏展开生成特化**：  
+     `BSP_REGISTER_STRUCT(T, ...)` 会生成 `Serializer` 和 `DefaultProtocol` 偏特化，用于编译期绑定协议和序列化逻辑。
+> 2. **Clangd 静态分析误判**：
+     Clangd 在分析模板时，发现 `DefaultProtocol<T>` 仍是 `bsp::proto::Default`，触发了模板约束检查（concept 或 `static_assert`）。实际上**编译器本身不会报错**，只是 Clangd 的模板解析器无法在 IDE 中正确推导出宏生成的偏特化。
 >
-> 1. 编译后重新加载 IDE
-> 2. 忽略/关闭 clangd 警告
-> 3. 显式提供 `DefaultProtocol` 特化：
-> 
->   ```c++
->   namespace bsp::proto { template<> struct DefaultProtocol<Point> { using type = proto::Schema; }; }
->   ```
->
-> 4. 拆分宏：Schema 注册和 DefaultProtocol 显式注册分开
+> **解决方法：**
+> 1. **编译成功后重新加载 IDE**：编译器（GCC/Clang/MSVC）可以正常通过编译时，现代 IDE（如CLion）通常会更新静态检查结果
+> 2. **忽略 IDE 提示**：可能会导致意料之外的后果
+> 3. **显式提供 DefaultProtocol 特化**
+     >   ```c++
+     >   struct MyStruct { int a; int b; };
+     >
+     >   BSP_REGISTER_STRUCT(MyStruct,
+     >       BSP_FIELD(MyStruct, a),
+     >       BSP_FIELD(MyStruct, b)
+     >   );
+     >
+     >   // 显式指定默认协议为 Schema
+     >   namespace bsp::proto {
+     >       template<>
+     >       struct DefaultProtocol<MyStruct> {
+     >           using type = proto::Schema;
+     >       };
+     >   }
+     >   ```
+> 4. **更新 Clangd / IDE**：Clangd 16+ 对模板宏分析更稳定
+
 
 ### 7.3 自定义协议字段
 
 ```c++
 BSP_FIELD_WITH(Point, x, bsp::proto::Varint);
 ```
-
-* 避免使用 `PVal<T, Protocol>` 而是在结构体内定义协议字段，减少隐式转换问题
 
 ### 7.4 序列化结构体
 
@@ -332,13 +346,6 @@ namespace bsp::proto {
 }
 ```
 
-* 可覆盖默认协议
-* 仍可在调用时显式指定协议：
-
-```c++
-bsp::write<Fixed<8>>(w, my_obj);
-```
-
 ### 8.2 自定义 Serializer
 
 ```c++
@@ -358,10 +365,6 @@ namespace bsp::serialize {
     };
 }
 ```
-
-* 必须提供 `write` 和 `read`
-* 支持任意类型 T
-* 可与 `DefaultProtocol` 联用或直接指定协议
 
 ---
 
@@ -386,16 +389,17 @@ bsp::read<bsp::proto::Fixed<4>>(r, value);
 
 * 派生异常：
 
-  * `UnexpectedEOF`
-  * `InvalidVarint`
-  * `LengthOverflow`
-  * `VariantOutOfRange`
-  * `ABIError`
+    * `UnexpectedEOF`
+    * `InvalidVarint`
+    * `LengthOverflow`
+    * `VariantOutOfRange`
+    * `ABIError`
 
 * 全局策略：
-  ```c++
-  bsp::GlobalOptions::instance().error_policy = bsp::MEDIUM;
-  ```
+
+```c++
+bsp::GlobalOptions::instance().error_policy = bsp::MEDIUM;
+```
 
 * 默认为严格模式：遇任何错误，都抛出异常
 
@@ -408,4 +412,30 @@ bsp::read<bsp::proto::Fixed<4>>(r, value);
 * **ByteView 内存管理**：read 会 new 分配，调用方需 delete[]
 * **clangd 报红**：见 7.2
 * **Fixed 容器大小断言**：不匹配抛 `LengthOverflow`
-* **版本兼容**：Schema 是顺序敏感，无字段 ID，字段顺序变动会影响兼容性，多语言使用需注意
+* **版本兼容**：Schema 是顺序敏感，无字段 ID，字段顺序变动会影响兼容性
+
+---
+
+## 12. Examples 使用指引
+
+ByteSchema 提供示例覆盖常用和高级用法：
+
+```
+examples/
+├── 01_basic.cpp           // 原生类型序列化
+├── 02_vector_map.cpp      // vector / map 序列化
+├── 03_option_variant.cpp  // Option / variant
+├── 04_pval.cpp            // PVal / 多维数组
+├── 05_schema.cpp          // 自定义 Schema
+├── 06_custom_serializer.cpp // 自定义 Serializer
+```
+
+编译示例：
+
+```bash
+cd examples
+g++ -std=c++20 -I../include 01_basic.cpp -o 01_basic
+./01_basic
+```
+
+> 所有示例中 `bsp.hpp` 路径均为 `../include/bsp.hpp`。

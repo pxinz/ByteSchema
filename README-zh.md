@@ -178,7 +178,7 @@ examples/
 
 ```bash
 cd examples
-g++ -std=c++20 -Iinclude examples/01_basic.cpp -o 01_basic
+g++ -std=c++20 -I../include 01_basic.cpp -o 01_basic
 ./01_basic
 ```
 
