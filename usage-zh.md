@@ -295,22 +295,22 @@ BSP_REGISTER_STRUCT(Rect,
 > 1. **编译成功后重新加载 IDE**：编译器（GCC/Clang/MSVC）可以正常通过编译时，现代 IDE（如CLion）通常会更新静态检查结果
 > 2. **忽略 IDE 提示**：可能会导致意料之外的后果
 > 3. **显式提供 DefaultProtocol 特化**
-     >   ```c++
-     >   struct MyStruct { int a; int b; };
-     >
-     >   BSP_REGISTER_STRUCT(MyStruct,
-     >       BSP_FIELD(MyStruct, a),
-     >       BSP_FIELD(MyStruct, b)
-     >   );
-     >
-     >   // 显式指定默认协议为 Schema
-     >   namespace bsp::proto {
-     >       template<>
-     >       struct DefaultProtocol<MyStruct> {
-     >           using type = proto::Schema;
-     >       };
-     >   }
-     >   ```
+>   ```c++
+>   struct MyStruct { int a; int b; };
+>
+>   BSP_REGISTER_STRUCT(MyStruct,
+>       BSP_FIELD(MyStruct, a),
+>       BSP_FIELD(MyStruct, b)
+>   );
+>
+>   // 显式指定默认协议为 Schema
+>   namespace bsp::proto {
+>       template<>
+>       struct DefaultProtocol<MyStruct> {
+>           using type = proto::Schema;
+>       };
+>   }
+>   ```
 > 4. **更新 Clangd / IDE**：Clangd 16+ 对模板宏分析更稳定
 
 
