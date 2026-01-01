@@ -4,7 +4,8 @@
 
 ## 1. Introduction
 
-`bsp` is a lightweight, templated **byte serialization/deserialization framework** that provides efficient serialization support for C++ native types, containers, and custom structs. Key features:
+`bsp` is a lightweight, templated **byte serialization/deserialization framework** that provides efficient serialization
+support for C++ native types, containers, and custom structs. Key features:
 
 * **Fixed-width types** (`Fixed<>`) support byte-level representation of integers, floating-point numbers, and booleans
 * **Variable-length types** (`Varint`) support variable-length integers, strings, byte arrays, and containers
@@ -29,7 +30,8 @@ The goal is a **cross-platform, controllable, safe, and flexible** binary protoc
 | `Schema`   | User-defined struct                                               | User-registered structs            |
 | `Default`  | Default protocol, a placeholder mapping to `DefaultProtocol_t<T>` | All unspecified types              |
 
-> Note: When `T` is a container, `Fixed<0>` indicates the container is empty and, in all default container `Serializer` implementations, results in no reading or writing.
+> Note: When `T` is a container, `Fixed<0>` indicates the container is empty and, in all default container `Serializer`
+> implementations, results in no reading or writing.
 
 ### 2.2 Default Protocol Mapping
 
@@ -51,7 +53,8 @@ The goal is a **cross-platform, controllable, safe, and flexible** binary protoc
 | Else                              | Default          |
 
 > Note: `Default` is a placeholder, ultimately mapped to a concrete protocol by `DefaultProtocol_t<T>`.  
-> Of course, you can customize the implementation of the Serializer under the Default protocol, in which case no further mapping will occur.
+> Of course, you can customize the implementation of the Serializer under the Default protocol, in which case no further
+> mapping will occur.
 ---
 
 ### 2.3 Global Options `GlobalOptions`
@@ -221,6 +224,13 @@ BSP_REGISTER_STRUCT(Rect,
 * `BSP_FIELD` automatically uses `DefaultProtocol_t<T>`
 * `BSP_FIELD_WITH` allows custom protocols
 
+> ⚠ Warning:  
+> When using macros to define structures, some IDEs may incorrectly report the following error:
+> ```
+> Clangd: In template: static assertion failed due to requirement '!std::is_same_v<bsp::proto::Default, bsp::proto::Default>': No concrete DefaultProtocol for this type
+> ```
+> This does not actually cause issues. You can solve the problem by disabling `Clangd`'s `static_assert` detection.
+
 ### 7.3 Serialize Struct
 
 ```c++
@@ -310,7 +320,8 @@ int main() {
 
 * Must provide `write(io::Writer&, const T&)` and `read(io::Reader&, T&)`
 * Supports any type `T`
-* Can be used together with the previous method to override the default protocol (`DefaultProtocol`) or directly specify a protocol in the `Protocol` tag
+* Can be used together with the previous method to override the default protocol (`DefaultProtocol`) or directly specify
+  a protocol in the `Protocol` tag
 
 ---
 
@@ -353,35 +364,42 @@ bsp::GlobalOptions::instance().error_policy = bsp::MEDIUM;
 ## 12. Small Example
 
 ```c++
-#include "bsp.hpp"
+#include "../include/bsp.hpp"
 #include <sstream>
 #include <iostream>
 
-struct Point { int x; int y; };
+struct Point {
+    int x;
+    int y;
+};
+
 BSP_REGISTER_STRUCT(Point,
-    BSP_FIELD(Point, x),
-    BSP_FIELD(Point, y)
+                    BSP_FIELD(Point, x),
+                    BSP_FIELD(Point, y)
 );
 
 int main() {
     std::stringstream ss;
+    bsp::io::Writer w(ss);
+    bsp::io::Reader r(ss);
 
     Point pt1{10, 20};
-    bsp::write(ss, pt1);
+    bsp::write(w, pt1);
 
     Point pt2{};
-    bsp::read(ss, pt2);
+    bsp::read(r, pt2);
 
     std::cout << "Point: " << pt2.x << ", " << pt2.y << "\n";
 
-    std::vector<int> vec{1,2,3};
-    bsp::write(ss, vec);
+    std::vector<int> vec{1, 2, 3};
+    bsp::write(w, vec);
 
     std::vector<int> vec2;
-    bsp::read(ss, vec2);
+    bsp::read(r, vec2);
 
-    for(auto v: vec2) std::cout << v << " ";  // 1 2 3
+    for (const auto v: vec2) std::cout << v << " "; // 1 2 3
 }
+
 ```
 
 * Demonstrates struct serialization, vector serialization

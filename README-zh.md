@@ -222,6 +222,13 @@ BSP_REGISTER_STRUCT(Rect,
 * `BSP_FIELD` 会自动使用 `DefaultProtocol_t<T>`
 * `BSP_FIELD_WITH` 可自定义协议
 
+> ⚠警告：  
+> 使用宏定义结构时，部分 IDE 可能会误判以下错误：
+> ```
+> Clangd: In template: static assertion failed due to requirement '!std::is_same_v<bsp::proto::Default, bsp::proto::Default>': No concrete DefaultProtocol for this type
+> ```
+> 这不会真正导致问题，可以禁止 `Clangd` 的 `static_assert` 检测来解决问题。
+
 ### 7.3 序列化结构体
 
 ```c++
@@ -355,35 +362,42 @@ bsp::GlobalOptions::instance().error_policy = bsp::MEDIUM;
 ## 12. 小例子
 
 ```c++
-#include "bsp.hpp"
+#include "../include/bsp.hpp"
 #include <sstream>
 #include <iostream>
 
-struct Point { int x; int y; };
+struct Point {
+    int x;
+    int y;
+};
+
 BSP_REGISTER_STRUCT(Point,
-    BSP_FIELD(Point, x),
-    BSP_FIELD(Point, y)
+                    BSP_FIELD(Point, x),
+                    BSP_FIELD(Point, y)
 );
 
 int main() {
     std::stringstream ss;
+    bsp::io::Writer w(ss);
+    bsp::io::Reader r(ss);
 
     Point pt1{10, 20};
-    bsp::write(ss, pt1);
+    bsp::write(w, pt1);
 
     Point pt2{};
-    bsp::read(ss, pt2);
+    bsp::read(r, pt2);
 
     std::cout << "Point: " << pt2.x << ", " << pt2.y << "\n";
 
-    std::vector<int> vec{1,2,3};
-    bsp::write(ss, vec);
+    std::vector<int> vec{1, 2, 3};
+    bsp::write(w, vec);
 
     std::vector<int> vec2;
-    bsp::read(ss, vec2);
+    bsp::read(r, vec2);
 
-    for(auto v: vec2) std::cout << v << " ";  // 1 2 3
+    for (const auto v: vec2) std::cout << v << " "; // 1 2 3
 }
+
 ```
 
 * 演示了结构体序列化、vector 序列化
