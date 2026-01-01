@@ -2,10 +2,7 @@
 #include <iostream>
 #include <sstream>
 
-using namespace bsp;
-
 // Define types and schemas
-
 struct Point {
     float x;
     float y;
@@ -51,14 +48,14 @@ int main() {
     st.scenes = {s1, s2};
 
     std::ostringstream os(std::ios::binary);
-    io::Writer w(os);
-    write(w, st);
+    bsp::io::Writer w(os);
+    bsp::write(w, st);
 
     std::string bytes = os.str();
     std::istringstream is(bytes, std::ios::binary);
-    io::Reader r(is);
+    bsp::io::Reader r(is);
     Stage out;
-    read(r, out);
+    bsp::read(r, out);
 
     std::cout << "Deserialized Stage: scenes = " << out.scenes.size() << "\n";
     for (size_t i = 0; i < out.scenes.size(); ++i) {

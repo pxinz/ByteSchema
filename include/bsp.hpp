@@ -7,6 +7,7 @@
 /// - 用户自定义结构体 Schema（Schema）
 
 // TODO: 运行时Any
+// TODO: max_depth实现
 
 #pragma once
 
@@ -46,7 +47,7 @@ namespace bsp {
         /// @brief 字节序设置，默认大端
         std::endian endian = std::endian::big;
 
-        /// @brief 最大递归深度（防止恶意构造导致栈/递归耗尽）
+        /// @brief 最大递归深度（防止恶意构造导致栈/递归耗尽），暂无实现
         size_t max_depth = 64;
         /// @brief 容器（vector/map 等）允许的最大元素数量
         size_t max_container_size = 1 << 20;
@@ -123,6 +124,29 @@ namespace bsp {
         struct ByteView {
             const uint8_t *data = nullptr;
             size_t size = 0;
+        };
+
+        /// @brief 携带 Protocol 的值类型
+        /// @tparam T 实际值类型
+        /// @tparam Protocol 序列化策略
+        template<typename T, typename Protocol>
+        struct PVal {
+            T value;
+
+            PVal() = default;
+
+            explicit PVal(const T &v) : value(v) {
+            }
+
+            explicit PVal(T &&v) : value(std::move(v)) {
+            }
+
+            // 隐式转换，方便访问 value
+            explicit operator T &() { return value; }
+            explicit operator const T &() const { return value; }
+
+            T &get() { return value; }
+            const T &get() const { return value; }
         };
     }
 
@@ -258,6 +282,11 @@ namespace bsp {
         template<typename T>
         struct DefaultProtocol<types::Option<T> > {
             using type = Varint;
+        };
+
+        template<typename T, typename Protocol>
+        struct DefaultProtocol<types::PVal<T, Protocol> > {
+            using type = Protocol;
         };
 
         /// @brief 工具别名，获取类型的默认协议
@@ -747,64 +776,19 @@ namespace bsp {
                 Serializer<T, proto::DefaultProtocol_t<T> >::read(r, out);
             }
         };
-    }
 
-    // Variant 序列化辅助工具
-    namespace utils {
-        /// @brief 递归写入 Variant 中对应索引的值
-        template<std::size_t I, typename... Ts>
-        struct VariantWriter;
+        // 指定Protocol类型的序列化
+        template<typename T, typename ProtocolT, typename Protocol>
+        struct Serializer<types::PVal<T, ProtocolT>, Protocol> {
+            static void write(io::Writer &w, const types::PVal<T, ProtocolT> &v) {
+                Serializer<T, Protocol>::write(w, v.value);
+            }
 
-        template<std::size_t I, typename T, typename... Ts>
-        struct VariantWriter<I, T, Ts...> {
-            static void write(std::size_t idx,
-                              io::Writer &w,
-                              const std::variant<T, Ts...> &v) {
-                if (idx == I) {
-                    serialize::Serializer<T, proto::DefaultProtocol_t<T> >::write(
-                        w, std::get<I>(v));
-                } else {
-                    VariantWriter<I + 1, Ts...>::write(idx, w, v);
-                }
+            static void read(io::Reader &r, types::PVal<T, ProtocolT> &out) {
+                Serializer<T, Protocol>::read(r, out.value);
             }
         };
 
-        template<std::size_t I>
-        struct VariantWriter<I> {
-            static void write(std::size_t, io::Writer &, const std::variant<> &) {
-                throw error::VariantOutOfRange("variant index out of range");
-            }
-        };
-
-        /// @brief 递归读取 Variant 对应索引的值
-        template<std::size_t I, typename... Ts>
-        struct VariantReader;
-
-        template<std::size_t I, typename T, typename... Ts>
-        struct VariantReader<I, T, Ts...> {
-            static void read(std::size_t idx,
-                             io::Reader &r,
-                             std::variant<T, Ts...> &out) {
-                if (idx == I) {
-                    T value;
-                    serialize::Serializer<T, proto::DefaultProtocol_t<T> >::read(r, value);
-                    out = std::move(value);
-                } else {
-                    VariantReader<I + 1, Ts...>::read(idx, r, out);
-                }
-            }
-        };
-
-        template<std::size_t I>
-        struct VariantReader<I> {
-            static void read(std::size_t, io::Reader &, std::variant<> &) {
-                throw error::VariantOutOfRange("variant index out of range");
-            }
-        };
-    }
-
-    // 可变类型序列化
-    namespace serialize {
         /// @name 可变值序列化
         /// @{
         // 可选值
@@ -831,21 +815,31 @@ namespace bsp {
         // 可变类型值
         template<typename... Ts>
         struct Serializer<std::variant<Ts...>, proto::Varint> {
-            static void write(io::Writer &w,
-                              const std::variant<Ts...> &v) {
-                std::size_t idx = v.index();
-                utils::write_uleb128(w, idx);
-                utils::VariantWriter<0, Ts...>::write(idx, w, v);
+            static void write(io::Writer &w, const std::variant<Ts...> &v) {
+                utils::write_uleb128(w, v.index());
+                std::visit([&](auto &&val) {
+                    using T = std::decay_t<decltype(val)>;
+                    Serializer<T, proto::DefaultProtocol_t<T> >::write(w, val);
+                }, v);
             }
 
-            static void read(io::Reader &r,
-                             std::variant<Ts...> &out) {
+            static void read(io::Reader &r, std::variant<Ts...> &out) {
                 uint64_t idx = utils::read_uleb128(r);
-                if (idx >= sizeof...(Ts)) {
-                    throw error::VariantOutOfRange("variant index out of range");
-                }
-                utils::VariantReader<0, Ts...>::read(
-                    static_cast<std::size_t>(idx), r, out);
+                if (idx >= sizeof...(Ts)) throw error::VariantOutOfRange("variant index out of range");
+
+                // 使用 index_sequence 生成 tuple，访问对应类型
+                bool assigned = false;
+                std::size_t current = 0;
+                ([&] {
+                    if (current++ == idx) {
+                        using T = Ts;
+                        T value;
+                        Serializer<T, proto::DefaultProtocol_t<T> >::read(r, value);
+                        out = std::move(value);
+                        assigned = true;
+                    }
+                }(), ...);
+                if (!assigned) throw error::VariantOutOfRange("variant index out of range");
             }
         };
 
@@ -859,15 +853,15 @@ namespace bsp {
 #define BSP_FIELD_WITH(TYPE, MEMBER, PROTO) \
     bsp::schema::Field<TYPE, decltype(TYPE::MEMBER), PROTO>(#MEMBER, &TYPE::MEMBER)
 
-#define BSP_REGISTER_STRUCT(TYPE, ...)                                      \
-template<>                                                              \
-struct bsp::schema::Schema<TYPE> {                                      \
-    using Self = TYPE;                                                   \
-    inline static constexpr auto fields_value =                          \
-        std::make_tuple(__VA_ARGS__);                                    \
-    static constexpr const auto& fields() {                              \
-        return fields_value;                                             \
-    }                                                                    \
+#define BSP_REGISTER_STRUCT(TYPE, ...)              \
+template<>                                          \
+struct bsp::schema::Schema<TYPE> {                  \
+    using Self = TYPE;                              \
+    inline static constexpr auto fields_value =     \
+        std::make_tuple(__VA_ARGS__);               \
+    static constexpr const auto& fields() {         \
+        return fields_value;                        \
+    }                                               \
 }
 
 
