@@ -1,405 +1,221 @@
-# BSP (ByteSchema) 使用文档
+# ByteSchema
 
-[English Version](./README.md)
-
-## 1. 简介
-
-`bsp` 是一个轻量级、模板化的 **字节序列化/反序列化框架**，提供对 C++ 原生类型、容器以及自定义结构体的高效序列化支持。主要特点：
-
-* **固定宽度类型**（`Fixed<>`）支持整数、浮点数、布尔值的字节级表示
-* **变长类型**（`Varint`）支持可变长度整数、字符串、字节数组、容器
-* **结构化类型**（`Schema`）支持用户自定义结构体
-* 支持 `Option<T>` 和 `std::variant<Ts...>`
-* 全局配置可控（字节序、最大容器大小、递归深度、安全策略）
-* 错误处理可选（严格、中等、忽略）
-* `bsp.hpp` 需要 `C++20` 及以上
-
-目标是**跨平台、可控、安全、灵活**的二进制协议框架。
+> **C++ 高性能二进制编码 + Schema 库**
+> 轻量、零依赖、强类型
+> 使用 C++ 类型直接定义 Schema
+> [English Version](./README.md)
 
 ---
 
-## 2. 基础概念
+## 核心特性
 
-### 2.1 协议标签（Protocol Tag）
-
-| 标签         | 说明                                  | 默认应用类型                      |
-|------------|-------------------------------------|-----------------------------|
-| `Fixed<N>` | 固定宽度类型，仅当T为容器时 `N` 有意义              | 整数、浮点、布尔、tuple              |
-| `Varint`   | 变长类型，适用于整数、容器、字符串                   | vector、map、string、ByteArray |
-| `Schema`   | 用户自定义结构体                            | 用户注册的结构体                    |
-| `Default`  | 默认协议，占位符，映射到 `DefaultProtocol_t<T>` | 所有未指定类型                     |
-
-> 注：`T` 是容器时，`Fixed<0>` 表示容器内是空的，在所有默认容器 `Serializer` 实现中都表现为不读出，不写入。
-
-### 2.2 默认协议映射
-
-`proto::DefaultProtocol_t<T>` 提供类型到协议的默认映射：
-
-| 类型                  | 默认协议    |
-|---------------------|---------|
-| bool                | Fixed<> |
-| 整数（有符号/无符号）         | Fixed<> |
-| 浮点数                 | Fixed<> |
-| std::string         | Varint  |
-| ByteArray           | Varint  |
-| std::vector<T>      | Varint  |
-| std::map<K,V>       | Varint  |
-| std::tuple<Ts...>   | Fixed<> |
-| std::variant<Ts...> | Varint  |
-| Option<T>           | Varint  |
-| 用户结构体 T（已注册 Schema） | Schema  |
-| 其它                  | Default |
-
-> 注：`Default` 是占位符，最终由 `DefaultProtocol_t<T>` 映射到具体协议。  
-> 当然，你可以自定义 `Default` 协议下 `Serializer` 的实现，那么不会再进行映射。
+* Header-only，无运行时反射
+* 支持多协议 & 复杂数据结构
+* 高频率通信 & 大规模数据优化
+* 支持 C++20 及以上
+* 类型安全，IDE 完全支持补全
 
 ---
 
-### 2.3 全局选项 `GlobalOptions`
+## 核心概念
 
-用于全局控制序列化行为、安全限制与 ABI：
+更多用法请见 [`usage-zh.md`](./usage-zh.md)
+
+### Protocol
+
+ByteSchema 支持多种协议，每种协议定义了二进制编码规则：
+
+| Protocol     | 描述                        | 适用场景        |
+|--------------|---------------------------|-------------|
+| `Varint`     | 变长整数编码，节省空间               | 小整数或可变长度容器  |
+| `Fixed<N>`   | 固定长度编码                    | 定长数组、固定宽度结构 |
+| 自定义 Protocol | 可自行实现 `read/write`，适配特殊需求 | 特殊协议或性能优化   |
+
+> 支持 **嵌套组合**，可表达任意复杂数据结构。
+
+---
+
+### PVal<T, Protocol>
+
+包装类型，将普通类型绑定到指定 Protocol：
 
 ```c++
-struct GlobalOptions {
-    std::endian endian = std::endian::big; // 字节序
-    size_t max_depth = 64;                 // 最大递归深度
-    size_t max_container_size = 1 << 20;   // 容器最大元素数
-    size_t max_string_size = 1 << 20;      // 字符串/ByteArray最大长度
-    bool strict_eof = false;               // 读完对象后要求 EOF
-    ErrorPolicy error_policy = STRICT;     // 错误策略
-    static GlobalOptions &instance();
+bsp::PVal<int, bsp::proto::Varint> age{18}; // 单值
+bsp::PVal<std::vector<int>, bsp::proto::Fixed<2>> scores{{90, 80, 70}}; // 单层 vector
+```
+
+嵌套组合示例：
+
+```c++
+bsp::PVal<
+    std::vector<bsp::PVal<int, bsp::proto::Varint>>,
+    bsp::proto::Fixed<2>
+> nestedScores{{ {100, 90}, {80, 70} }};
+```
+
+> PVal 支持多维数组、协议绑定，避免容器元素协议不明确的问题。
+
+---
+
+### Serializer<T, Protocol>
+
+模板静态生成读写逻辑：
+
+```c++
+template<typename T, typename Protocol>
+struct Serializer {
+    static void write(io::Writer&, const T&);
+    static void read(io::Reader&, T&);
 };
 ```
 
-* **错误策略**：`STRICT` / `MEDIUM` / `IGNORE`
-* **安全约束**：超长容器或字符串会抛 `LengthOverflow`
+特性：
 
-你可以按以下方法自定义选项：
-
-```c++
-bsp::GlobalOptions::instance().max_depth = 128;
-bsp::GlobalOptions::instance().max_container_size = 1<<16;
-```
+* **静态类型绑定**，无需运行时反射
+* **高性能**，嵌套组合自然支持
+* 支持任意类型组合，包括 `vector`, `PVal`, 自定义结构
 
 ---
 
-## 3. 基础类型序列化
+### Any —— 动态类型
 
-### 3.1 布尔值
-
-```c++
-bool b = true;
-bsp::io::Writer w(os);
-bsp::serialize::Serializer<bool, bsp::proto::Fixed<>>::write(w, b);
-
-bsp::io::Reader r(is);
-bool read_b;
-bsp::serialize::Serializer<bool, bsp::proto::Fixed<>>::read(r, read_b);
-```
-
-* 写入为 **单字节**
-* 仅支持 `Fixed<>`
-
-### 3.2 整数类型
-
-* **无符号/有符号整数**
-* 支持 `Fixed<>` 与 `Varint`（变长编码）
-* 有符号整数在 Varint 下使用 **ZigZag 编码**
+当类型在编译时未知，可使用 `Any`：
 
 ```c++
-uint32_t u = 123456;
-int32_t s = -42;
-
-// Fixed
-bsp::write<bsp::proto::Fixed<>>(w, u);
-bsp::write<bsp::proto::Fixed<>>(w, s);
-
-// Varint
-bsp::write<bsp::proto::Varint>(w, u);
-bsp::write<bsp::proto::Varint>(w, s);
+bsp::types::Any msg;
+msg.read(reader);
+msg.write(writer);
 ```
 
-### 3.3 浮点类型
-
-* 写入按字节拷贝 IEEE754
-* 仅支持 `Fixed<>`
-
-```c++
-float f = 3.14f;
-bsp::write<bsp::proto::Fixed<>>(w, f);
-```
+> 适合通用消息、插件式数据结构。
 
 ---
 
-## 4. 容器类型
-
-### 4.1 vector
+### Schema —— 类型内定义结构体
 
 ```c++
-std::vector<int> v = {1, 2, 3};
-
-// 变长序列化
-bsp::write(bsp::proto::Varint, w, v);
-bsp::read(bsp::proto::Varint, r, v);
-
-// 固定长度
-bsp::write<bsp::proto::Fixed<3>>(w, v);
+struct Player {
+    bsp::PVal<int, bsp::proto::Varint> id;
+    bsp::PVal<std::string, bsp::proto::Varint> name;
+};
 ```
 
-### 4.2 map
+特点：
 
-```c++
-std::map<std::string, int> m = {{"a",1}, {"b",2}};
-bsp::write(bsp::proto::Varint, w, m);
-bsp::read(bsp::proto::Varint, r, m);
-```
-
-### 4.3 string / ByteArray
-
-* 变长：前置 varint 长度
-* 固定：写入 N 字节，不足填充
-
-```c++
-std::string s = "hello";
-bsp::write(bsp::proto::Varint, w, s);
-
-bsp::types::ByteArray ba = {1,2,3};
-bsp::write(bsp::proto::Varint, w, ba);
-```
+* 高效、无运行时解析
+* 类型安全、IDE 支持补全
+* 序列化行为完全由类型决定
+* 可通过宏注册字段，支持自定义协议和默认协议映射
 
 ---
 
-## 5. 可选类型 `Option<T>`
+## 快速上手
 
-```c++
-bsp::types::Option<int> opt{42};
-bsp::write(w, opt);  // 前置 flag 0/1 + 可选值
-```
-
-* Flag = 0 表示无值
-* Flag = 1 表示有值
-
----
-
-## 6. 变体类型 `std::variant<Ts...>`
-
-* 写入前置索引（varint）
-* 然后写入对应类型的值
-
-```c++
-std::variant<int, std::string> var = "hi";
-bsp::write(w, var);
-bsp::read(r, var);
-```
-
-* 索引越界会抛 `VariantOutOfRange`
-
----
-
-## 7. 自定义结构体 `Schema`
-
-### 7.1 定义结构体
-
-```c++
-struct Point { int x; int y; };
-struct Rect { Point p1; Point p2; };
-```
-
-### 7.2 注册结构体
-
-```c++
-BSP_REGISTER_STRUCT(Point,
-    BSP_FIELD(Point, x),
-    BSP_FIELD(Point, y)
-);
-
-BSP_REGISTER_STRUCT(Rect,
-    BSP_FIELD(Rect, p1),
-    BSP_FIELD(Rect, p2)
-);
-```
-
-* `BSP_FIELD` 会自动使用 `DefaultProtocol_t<T>`
-* `BSP_FIELD_WITH` 可自定义协议
-
-> ⚠警告：  
-> 使用宏定义结构时，部分 IDE 可能会误判以下错误：
-> ```
-> Clangd: In template: static assertion failed due to requirement '!std::is_same_v<bsp::proto::Default, bsp::proto::Default>': No concrete DefaultProtocol for this type
-> ```
-> 这不会真正导致问题，可以禁止 `Clangd` 的 `static_assert` 检测来解决问题。
-
-### 7.3 序列化结构体
-
-```c++
-Point pt{1,2};
-bsp::write(w, pt);
-bsp::read(r, pt);
-```
-
-* 自动按字段顺序序列化
-* 默认协议由 `DefaultProtocol` 决定，注册后默认变成 `Schema`
-
-### 7.4 自定义协议字段
-
-有时结构体的子内容需要使用特殊协议：
-
-```c++
-BSP_FIELD_WITH(Point, x, bsp::proto::Varint)
-```
-
----
-
-## 8. 自定义 DefaultProtocol
-
-有时你希望修改某个类型默认协议：
-
-```c++
-namespace bsp::proto {
-    template<>
-    struct DefaultProtocol<MyType> {
-        using type = Fixed<4>; // 将 MyType 默认序列化为 Fixed<4>
-    };
-}
-```
-
-* 不必修改 Serializer 代码
-* 仍可在特定调用时显式指定协议
-
-```c++
-bsp::write<Fixed<8>>(w, my_obj);  // 显式协议覆盖默认
-```
-
----
-
-## 9. 自定义 Serializer
-
-如果默认协议不足，可自定义 Serializer，实现 write 和 read。
-
-### 9.1 示例：加密整数
-
-```c++
-#include <iostream>
-#include <sstream>
-#include "bsp.hpp"
-
-struct Encrypt {};
-
-namespace bsp::serialize {
-    template<>
-    struct Serializer<int, Encrypt> {
-        static void write(io::Writer &w, const int &s) {
-            int encrypted = s ^ 0x55AA; // 异或加密
-            utils::write_uleb128(w, encrypted);
-        }
-
-        static void read(io::Reader &r, int &out) {
-            int encrypted = static_cast<int>(utils::read_uleb128(r));
-            out = encrypted ^ 0x55AA;
-        }
-    };
-}
-
-int main() {
-    std::stringstream ss;
-    bsp::io::Writer w(ss);
-    bsp::io::Reader r(ss);
-
-    int s1 = 12345;
-    bsp::write<Encrypt>(w, s1);
-
-    int s2;
-    bsp::read<Encrypt>(r, s2);
-    std::cout << s2 << "\n"; // 输出 12345
-}
-```
-
-### 9.2 特性
-
-* 必须提供 `write(io::Writer&, const T&)` 和 `read(io::Reader&, T&)`
-* 支持任意类型 `T`
-* 可以和上一条一起使用覆盖默认协议（`DefaultProtocol`），或直接在 `Protocol` 中指定协议
-
----
-
-## 10. I/O 接口
-
-```c++
-bsp::io::Writer w(os);
-bsp::io::Reader r(is);
-
-bsp::write(w, value);          // 自动使用 DefaultProtocol_t<T>
-bsp::write<bsp::proto::Varint>(w, value); // 指定协议
-
-bsp::read(r, value);
-bsp::read<bsp::proto::Fixed<4>>(r, value);
-```
-
----
-
-## 11. 错误处理
-
-* `bsp::error::ProtocolError` 基类
-
-* 常见派生：
-
-    * `UnexpectedEOF`
-    * `InvalidVarint`
-    * `LengthOverflow`
-    * `VariantOutOfRange`
-    * `ABIError`
-
-* 全局错误策略：
-
-```c++
-bsp::GlobalOptions::instance().error_policy = bsp::MEDIUM;
-```
-
-* 默认严格模式（遇错则抛异常）
-
----
-
-## 12. 小例子
+### 1. 添加头文件
 
 ```c++
 #include "../include/bsp.hpp"
-#include <sstream>
-#include <iostream>
+```
 
-struct Point {
-    int x;
-    int y;
+### 2. 定义类型
+
+```c++
+struct Msg {
+    int id;
+    std::string content;
 };
 
-BSP_REGISTER_STRUCT(Point,
-                    BSP_FIELD(Point, x),
-                    BSP_FIELD(Point, y)
+// 定义消息结构 Msg
+BSP_SCHEMA(Msg,
+    BSP_FIELD(id, int),
+    BSP_FIELD(content, std::string)
 );
+```
+
+### 3. 写入 / 读取示例
+
+```c++
+#include <iostream>
+#include <sstream>
 
 int main() {
     std::stringstream ss;
-    bsp::io::Writer w(ss);
-    bsp::io::Reader r(ss);
 
-    Point pt1{10, 20};
-    bsp::write(w, pt1);
+    // 写入
+    bsp::io::Writer writer(ss);
+    Msg msg{{1}, {"Hello World"}};
+    bsp::write(writer, msg);
 
-    Point pt2{};
-    bsp::read(r, pt2);
+    // 读取
+    bsp::io::Reader reader(ss);
+    Msg msg2;
+    bsp::read(reader, msg2);
 
-    std::cout << "Point: " << pt2.x << ", " << pt2.y << "\n";
-
-    std::vector<int> vec{1, 2, 3};
-    bsp::write(w, vec);
-
-    std::vector<int> vec2;
-    bsp::read(r, vec2);
-
-    for (const auto v: vec2) std::cout << v << " "; // 1 2 3
+    std::cout << "id=" << msg2.id.value
+              << " content=" << msg2.content.value << "\n";
 }
-
 ```
 
-* 演示了结构体序列化、vector 序列化
-* 自动使用 `DefaultProtocol`
-* 安全检查（超长容器/字符串）
+> 直接编译运行即可验证序列化和反序列化。
+
+---
+
+## Examples 使用指引
+
+ByteSchema 提供丰富示例，覆盖常用和复杂用法：
+
+```
+examples/
+├── 01_basic.cpp           // 基础类型序列化
+├── 02_vector_map.cpp      // 容器序列化
+├── 03_option_variant.cpp  // Option 和 Variant
+├── 04_pval.cpp            // PVal / 多维数组
+├── 05_schema.cpp          // 自定义 Schema
+├── 06_custom_serializer.cpp // 自定义 Serializer 示例
+```
+
+编译示例：
+
+```bash
+cd examples
+g++ -std=c++20 -Iinclude examples/01_basic.cpp -o 01_basic
+./01_basic
+```
+
+或使用 `Makefile` / `CMakeLists.txt` 批量编译所有示例。
+
+> 所有示例中 `bsp.hpp` 路径均为 `../include/bsp.hpp`。
+
+---
+
+## 设计理念
+
+* 灵感来源 **Minecraft 通讯协议**
+* 高性能 + 类型绑定
+* 支持复杂数据结构与高频通信
+* C++20 模板特性实现零运行时开销
+
+---
+
+## 贡献指南
+
+欢迎提交 issue / PR：
+
+1. 修复 bug
+2. 增加 Protocol 或 Codec
+3. 提供更多使用示例
+4. 性能优化
+
+**注意事项**：
+
+* PR 前确保 `examples/*.cpp` 可编译
+* 遵循 C++20 标准
+* 遵循命名风格与类型约定
+
+---
+
+## 开源协议
+
+MIT LICENSE
+
+使用和修改请遵循 MIT 协议。

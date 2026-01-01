@@ -1,407 +1,221 @@
-# BSP (ByteSchema) Usage Documentation
+# ByteSchema
 
-[中文版](./README-zh.md)
-
-## 1. Introduction
-
-`bsp` is a lightweight, templated **byte serialization/deserialization framework** that provides efficient serialization
-support for C++ native types, containers, and custom structs. Key features:
-
-* **Fixed-width types** (`Fixed<>`) support byte-level representation of integers, floating-point numbers, and booleans
-* **Variable-length types** (`Varint`) support variable-length integers, strings, byte arrays, and containers
-* **Structured types** (`Schema`) support user-defined structs
-* Supports `Option<T>` and `std::variant<Ts...>`
-* Globally configurable (endianness, maximum container size, recursion depth, safety policies)
-* Optional error handling (strict, medium, ignore)
-* Requires `C++20` for `bsp.hpp`
-
-The goal is a **cross-platform, controllable, safe, and flexible** binary protocol framework.
+> **C++ High-Performance Binary Encoding + Schema Library**  
+> Lightweight, zero dependencies, strong typing  
+> Define schemas directly with C++ types  
+> [中文版本](./README-zh.md)
 
 ---
 
-## 2. Basic Concepts
+## Core Features
 
-### 2.1 Protocol Tags
+* Header-only, no runtime reflection
+* Supports multiple protocols & complex data structures
+* Optimized for high-frequency communication & large-scale data
+* Requires C++20 or later
+* Type-safe with full IDE autocompletion support
 
-| Tag        | Description                                                       | Default Applied Types              |
-|------------|-------------------------------------------------------------------|------------------------------------|
-| `Fixed<N>` | Fixed-width type; `N` is meaningful only when T is a container    | integers, floats, booleans, tuples |
-| `Varint`   | Variable-length type; suitable for integers, containers, strings  | vector, map, string, ByteArray     |
-| `Schema`   | User-defined struct                                               | User-registered structs            |
-| `Default`  | Default protocol, a placeholder mapping to `DefaultProtocol_t<T>` | All unspecified types              |
-
-> Note: When `T` is a container, `Fixed<0>` indicates the container is empty and, in all default container `Serializer`
-> implementations, results in no reading or writing.
-
-### 2.2 Default Protocol Mapping
-
-`proto::DefaultProtocol_t<T>` provides the default mapping from types to protocols:
-
-| Type                              | Default Protocol |
-|-----------------------------------|------------------|
-| bool                              | Fixed<>          |
-| Integers (signed/unsigned)        | Fixed<>          |
-| Floating-point                    | Fixed<>          |
-| std::string                       | Varint           |
-| ByteArray                         | Varint           |
-| std::vector<T>                    | Varint           |
-| std::map<K,V>                     | Varint           |
-| std::tuple<Ts...>                 | Fixed<>          |
-| std::variant<Ts...>               | Varint           |
-| Option<T>                         | Varint           |
-| User struct T (registered Schema) | Schema           |
-| Else                              | Default          |
-
-> Note: `Default` is a placeholder, ultimately mapped to a concrete protocol by `DefaultProtocol_t<T>`.  
-> Of course, you can customize the implementation of the Serializer under the Default protocol, in which case no further
-> mapping will occur.
 ---
 
-### 2.3 Global Options `GlobalOptions`
+## Core Concepts
 
-Used for global control of serialization behavior, safety limits, and ABI:
+For more detailed usage, see [`usage.md`](./usage.md).
+
+### Protocol
+
+ByteSchema supports multiple protocols, each defining binary encoding rules:
+
+| Protocol        | Description                                              | Use Case                                       |
+|-----------------|----------------------------------------------------------|------------------------------------------------|
+| `Varint`        | Variable-length integer encoding, saves space            | Small integers or variable-length containers   |
+| `Fixed<N>`      | Fixed-length encoding                                    | Fixed-size arrays, fixed-width structures      |
+| Custom Protocol | Implement `read/write` yourself for special requirements | Special protocols or performance optimizations |
+
+> Supports **nested composition** to express arbitrarily complex data structures.
+
+---
+
+### PVal<T, Protocol>
+
+Wrapper type that binds a plain type to a specific Protocol:
 
 ```c++
-struct GlobalOptions {
-    std::endian endian = std::endian::big; // Endianness
-    size_t max_depth = 64;                 // Maximum recursion depth
-    size_t max_container_size = 1 << 20;   // Maximum container element count
-    size_t max_string_size = 1 << 20;      // Maximum string/ByteArray length
-    bool strict_eof = false;               // Require EOF after reading the object
-    ErrorPolicy error_policy = STRICT;     // Error policy
-    static GlobalOptions &instance();
+bsp::PVal<int, bsp::proto::Varint> age{18}; // Single value
+bsp::PVal<std::vector<int>, bsp::proto::Fixed<2>> scores{{90, 80, 70}}; // Single-layer vector
+```
+
+Nested composition example:
+
+```c++
+bsp::PVal<
+    std::vector<bsp::PVal<int, bsp::proto::Varint>>,
+    bsp::proto::Fixed<2>
+> nestedScores{{ {100, 90}, {80, 70} }};
+```
+
+> PVal supports multi-dimensional arrays and protocol binding, avoiding ambiguity in container element protocols.
+
+---
+
+### Serializer<T, Protocol>
+
+Template that statically generates read/write logic:
+
+```c++
+template<typename T, typename Protocol>
+struct Serializer {
+    static void write(io::Writer&, const T&);
+    static void read(io::Reader&, T&);
 };
 ```
 
-* **Error policies**: `STRICT` / `MEDIUM` / `IGNORE`
-* **Safety constraints**: Overly long containers or strings will throw `LengthOverflow`
+Features:
 
-You can customize options as follows:
-
-```c++
-bsp::GlobalOptions::instance().max_depth = 128;
-bsp::GlobalOptions::instance().max_container_size = 1<<16;
-```
+* **Static type binding**, no runtime reflection
+* **High performance**, naturally supports nested composition
+* Supports arbitrary type combinations, including `vector`, `PVal`, and custom structures
 
 ---
 
-## 3. Basic Type Serialization
+### Any – Dynamic Type
 
-### 3.1 Boolean
-
-```c++
-bool b = true;
-bsp::io::Writer w(os);
-bsp::serialize::Serializer<bool, bsp::proto::Fixed<>>::write(w, b);
-
-bsp::io::Reader r(is);
-bool read_b;
-bsp::serialize::Serializer<bool, bsp::proto::Fixed<>>::read(r, read_b);
-```
-
-* Written as **single byte**
-* Only supports `Fixed<>`
-
-### 3.2 Integer Types
-
-* **Unsigned/Signed integers**
-* Supports `Fixed<>` and `Varint` (variable-length encoding)
-* Signed integers under Varint use **ZigZag encoding**
+When the type is unknown at compile time, use `Any`:
 
 ```c++
-uint32_t u = 123456;
-int32_t s = -42;
-
-// Fixed
-bsp::write<bsp::proto::Fixed<>>(w, u);
-bsp::write<bsp::proto::Fixed<>>(w, s);
-
-// Varint
-bsp::write<bsp::proto::Varint>(w, u);
-bsp::write<bsp::proto::Varint>(w, s);
+bsp::types::Any msg;
+msg.read(reader);
+msg.write(writer);
 ```
 
-### 3.3 Floating-Point Types
-
-* Written by byte-copying IEEE754 representation
-* Only supports `Fixed<>`
-
-```c++
-float f = 3.14f;
-bsp::write<bsp::proto::Fixed<>>(w, f);
-```
+> Suitable for generic messages, plugin-style data structures.
 
 ---
 
-## 4. Container Types
-
-### 4.1 vector
+### Schema – Define Structures with Types
 
 ```c++
-std::vector<int> v = {1, 2, 3};
-
-// Variable-length serialization
-bsp::write(bsp::proto::Varint, w, v);
-bsp::read(bsp::proto::Varint, r, v);
-
-// Fixed-length
-bsp::write<bsp::proto::Fixed<3>>(w, v);
+struct Player {
+    bsp::PVal<int, bsp::proto::Varint> id;
+    bsp::PVal<std::string, bsp::proto::Varint> name;
+};
 ```
 
-### 4.2 map
+Features:
 
-```c++
-std::map<std::string, int> m = {{"a",1}, {"b",2}};
-bsp::write(bsp::proto::Varint, w, m);
-bsp::read(bsp::proto::Varint, r, m);
-```
-
-### 4.3 string / ByteArray
-
-* Variable-length: Prefixed with varint length
-* Fixed-length: Write N bytes, pad if insufficient
-
-```c++
-std::string s = "hello";
-bsp::write(bsp::proto::Varint, w, s);
-
-bsp::types::ByteArray ba = {1,2,3};
-bsp::write(bsp::proto::Varint, w, ba);
-```
+* Efficient, no runtime parsing
+* Type-safe, IDE supports autocompletion
+* Serialization behavior entirely determined by types
+* Can register fields via macros, supports custom protocols and default protocol mapping
 
 ---
 
-## 5. Optional Type `Option<T>`
+## Quick Start
 
-```c++
-bsp::types::Option<int> opt{42};
-bsp::write(w, opt);  // Prefixed flag 0/1 + optional value
-```
-
-* Flag = 0 indicates no value
-* Flag = 1 indicates a value
-
----
-
-## 6. Variant Type `std::variant<Ts...>`
-
-* Write prefixed index (varint)
-* Then write the value of the corresponding type
-
-```c++
-std::variant<int, std::string> var = "hi";
-bsp::write(w, var);
-bsp::read(r, var);
-```
-
-* Index out of range throws `VariantOutOfRange`
-
----
-
-## 7. Custom Struct `Schema`
-
-### 7.1 Define Struct
-
-```c++
-struct Point { int x; int y; };
-struct Rect { Point p1; Point p2; };
-```
-
-### 7.2 Register Struct
-
-```c++
-BSP_REGISTER_STRUCT(Point,
-    BSP_FIELD(Point, x),
-    BSP_FIELD(Point, y)
-);
-
-BSP_REGISTER_STRUCT(Rect,
-    BSP_FIELD(Rect, p1),
-    BSP_FIELD(Rect, p2)
-);
-```
-
-* `BSP_FIELD` automatically uses `DefaultProtocol_t<T>`
-* `BSP_FIELD_WITH` allows custom protocols
-
-> ⚠ Warning:  
-> When using macros to define structures, some IDEs may incorrectly report the following error:
-> ```
-> Clangd: In template: static assertion failed due to requirement '!std::is_same_v<bsp::proto::Default, bsp::proto::Default>': No concrete DefaultProtocol for this type
-> ```
-> This does not actually cause issues. You can solve the problem by disabling `Clangd`'s `static_assert` detection.
-
-### 7.3 Serialize Struct
-
-```c++
-Point pt{1,2};
-bsp::write(w, pt);
-bsp::read(r, pt);
-```
-
-* Automatically serializes in field order
-* Default protocol determined by `DefaultProtocol`; becomes `Schema` after registration
-
-### 7.4 Custom Protocol Fields
-
-Sometimes sub-fields of a struct require special protocols:
-
-```c++
-BSP_FIELD_WITH(Point, x, bsp::proto::Varint)
-```
-
----
-
-## 8. Custom DefaultProtocol
-
-Sometimes you may want to modify the default protocol for a type:
-
-```c++
-namespace bsp::proto {
-    template<>
-    struct DefaultProtocol<MyType> {
-        using type = Fixed<4>; // Make MyType default to Fixed<4>
-    };
-}
-```
-
-* No need to modify Serializer code
-* Can still explicitly specify a protocol during specific calls
-
-```c++
-bsp::write<Fixed<8>>(w, my_obj);  // Explicit protocol overrides default
-```
-
----
-
-## 9. Custom Serializer
-
-If the default protocol is insufficient, you can customize Serializer by implementing `write` and `read`.
-
-### 9.1 Example: Encrypted Integer
-
-```c++
-#include <iostream>
-#include <sstream>
-#include "bsp.hpp"
-
-struct Encrypt {};
-
-namespace bsp::serialize {
-    template<>
-    struct Serializer<int, Encrypt> {
-        static void write(io::Writer &w, const int &s) {
-            int encrypted = s ^ 0x55AA; // XOR encryption
-            utils::write_uleb128(w, encrypted);
-        }
-
-        static void read(io::Reader &r, int &out) {
-            int encrypted = static_cast<int>(utils::read_uleb128(r));
-            out = encrypted ^ 0x55AA;
-        }
-    };
-}
-
-int main() {
-    std::stringstream ss;
-    bsp::io::Writer w(ss);
-    bsp::io::Reader r(ss);
-
-    int s1 = 12345;
-    bsp::write<Encrypt>(w, s1);
-
-    int s2;
-    bsp::read<Encrypt>(r, s2);
-    std::cout << s2 << "\n"; // Outputs 12345
-}
-```
-
-### 9.2 Characteristics
-
-* Must provide `write(io::Writer&, const T&)` and `read(io::Reader&, T&)`
-* Supports any type `T`
-* Can be used together with the previous method to override the default protocol (`DefaultProtocol`) or directly specify
-  a protocol in the `Protocol` tag
-
----
-
-## 10. I/O Interface
-
-```c++
-bsp::io::Writer w(os);
-bsp::io::Reader r(is);
-
-bsp::write(w, value);          // Automatically uses DefaultProtocol_t<T>
-bsp::write<bsp::proto::Varint>(w, value); // Specify protocol
-
-bsp::read(r, value);
-bsp::read<bsp::proto::Fixed<4>>(r, value);
-```
-
----
-
-## 11. Error Handling
-
-* `bsp::error::ProtocolError` base class
-
-* Common derived errors:
-    * `UnexpectedEOF`
-    * `InvalidVarint`
-    * `LengthOverflow`
-    * `VariantOutOfRange`
-    * `ABIError`
-
-* Global error policy:
-
-```c++
-bsp::GlobalOptions::instance().error_policy = bsp::MEDIUM;
-```
-
-* Default strict mode (throws exception on error)
-
----
-
-## 12. Small Example
+### 1. Add Header
 
 ```c++
 #include "../include/bsp.hpp"
-#include <sstream>
-#include <iostream>
+```
 
-struct Point {
-    int x;
-    int y;
+### 2. Define Type
+
+```c++
+struct Msg {
+    int id;
+    std::string content;
 };
 
-BSP_REGISTER_STRUCT(Point,
-                    BSP_FIELD(Point, x),
-                    BSP_FIELD(Point, y)
+// Define message structure Msg
+BSP_SCHEMA(Msg,
+    BSP_FIELD(id, int),
+    BSP_FIELD(content, std::string)
 );
+```
+
+### 3. Write / Read Example
+
+```c++
+#include <iostream>
+#include <sstream>
 
 int main() {
     std::stringstream ss;
-    bsp::io::Writer w(ss);
-    bsp::io::Reader r(ss);
 
-    Point pt1{10, 20};
-    bsp::write(w, pt1);
+    // Write
+    bsp::io::Writer writer(ss);
+    Msg msg{{1}, {"Hello World"}};
+    bsp::write(writer, msg);
 
-    Point pt2{};
-    bsp::read(r, pt2);
+    // Read
+    bsp::io::Reader reader(ss);
+    Msg msg2;
+    bsp::read(reader, msg2);
 
-    std::cout << "Point: " << pt2.x << ", " << pt2.y << "\n";
-
-    std::vector<int> vec{1, 2, 3};
-    bsp::write(w, vec);
-
-    std::vector<int> vec2;
-    bsp::read(r, vec2);
-
-    for (const auto v: vec2) std::cout << v << " "; // 1 2 3
+    std::cout << "id=" << msg2.id.value
+              << " content=" << msg2.content.value << "\n";
 }
-
 ```
 
-* Demonstrates struct serialization, vector serialization
-* Automatically uses `DefaultProtocol`
-* Safety checks (overly long containers/strings)
+> Compile and run directly to verify serialization and deserialization.
+
+---
+
+## Examples Guide
+
+ByteSchema provides rich examples covering common and advanced usage:
+
+```
+examples/
+├── 01_basic.cpp           // Basic type serialization
+├── 02_vector_map.cpp      // Container serialization
+├── 03_option_variant.cpp  // Option and Variant
+├── 04_pval.cpp            // PVal / Multi-dimensional arrays
+├── 05_schema.cpp          // Custom Schema
+├── 06_custom_serializer.cpp // Custom Serializer example
+```
+
+Compile examples:
+
+```bash
+cd examples
+g++ -std=c++20 -Iinclude examples/01_basic.cpp -o 01_basic
+./01_basic
+```
+
+Or use the provided `Makefile` / `CMakeLists.txt` to batch compile all examples.
+
+> In all examples, the path to `bsp.hpp` is `../include/bsp.hpp`.
+
+---
+
+## Design Philosophy
+
+* Inspired by **Minecraft communication protocols**
+* High performance + type binding
+* Supports complex data structures and high-frequency communication
+* Zero runtime overhead using C++20 template features
+
+---
+
+## Contribution Guide
+
+Welcome to submit issues / PRs:
+
+1. Fix bugs
+2. Add new Protocols or Codecs
+3. Provide more usage examples
+4. Performance optimizations
+
+**Notes**:
+
+* Ensure `examples/*.cpp` compiles before submitting a PR
+* Follow C++20 standards
+* Adhere to naming conventions and type conventions
+
+---
+
+## License
+
+MIT LICENSE
+
+Use and modification under MIT license.
