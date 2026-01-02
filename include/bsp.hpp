@@ -100,55 +100,6 @@ namespace bsp {
         };
     }
 
-    namespace types {
-        /// @brief 可选值模板
-        ///
-        /// 类似于 std::optional，但为了避免依赖及控制二进制布局而提供简化版本。
-        template<typename T>
-        struct Option {
-            /// 是否有值
-            bool has_value = false;
-            /// 值（未初始化时不可读取）
-            T value;
-
-            Option() = default;
-
-            explicit Option(const T &v) : has_value(true), value(v) {
-            }
-        };
-
-        /// 字节数组类型别名
-        using ByteArray = std::vector<uint8_t>;
-
-        /// 非拥有者字节视图（注意：读取时本实现会分配内存）
-        struct ByteView {
-            const uint8_t *data = nullptr;
-            size_t size = 0;
-        };
-
-        /// @brief 携带 Protocol 的值类型
-        /// @tparam T 实际值类型
-        /// @tparam Protocol 序列化策略
-        template<typename T, typename Protocol>
-        struct PVal {
-            T value;
-
-            PVal() = default;
-
-            explicit PVal(const T &v) : value(v) {
-            }
-
-            explicit PVal(T &&v) : value(std::move(v)) {
-            }
-
-            // 隐式转换，方便访问 value
-            explicit operator T &() { return value; }
-            explicit operator const T &() const { return value; }
-
-            T &get() { return value; }
-            const T &get() const { return value; }
-        };
-    }
 
     /// 抽象接口定义
     /// @{
@@ -167,6 +118,10 @@ namespace bsp {
 
         /// @brief 表示该类型由用户提供 Schema 描述（结构体序列化）
         struct Schema {
+        };
+
+        /// @brief 表示该类型由 CVal 提供
+        struct CVal {
         };
 
         /// @brief 默认占位符协议类型
@@ -268,13 +223,13 @@ namespace bsp {
             /// @brief 写入数据体，相当于write(w, v)
             template<typename Protocol, typename T>
             inline void write(const T &v) {
-                serialize::Serializer<T, Protocol>::write(this, v);
+                serialize::Serializer<T, Protocol>::write(*this, v);
             }
 
             /// @brief 写入数据体，相当于write(w, v)
             template<typename T>
             inline void write(const T &v) {
-                serialize::Serializer<T, proto::DefaultProtocol_t<T> >::write(this, v);
+                serialize::Serializer<T, proto::DefaultProtocol_t<T> >::write(*this, v);
             }
         };
 
@@ -304,14 +259,72 @@ namespace bsp {
             /// @brief 读出数据体，相当于read(r, out)
             template<typename Protocol, typename T>
             inline void read(T &out) {
-                serialize::Serializer<T, Protocol>::read(this, out);
+                serialize::Serializer<T, Protocol>::read(*this, out);
             }
 
             /// @brief 读出数据体，相当于read(r, out)
             template<typename T>
             inline void read(T &out) {
-                serialize::Serializer<T, proto::DefaultProtocol_t<T> >::read(this, out);
+                serialize::Serializer<T, proto::DefaultProtocol_t<T> >::read(*this, out);
             }
+        };
+    }
+
+    namespace types {
+        /// @brief 可选值模板
+        ///
+        /// 类似于 std::optional，但为了避免依赖及控制二进制布局而提供简化版本。
+        template<typename T>
+        struct Option {
+            /// 是否有值
+            bool has_value = false;
+            /// 值（未初始化时不可读取）
+            T value;
+
+            Option() = default;
+
+            explicit Option(const T &v) : has_value(true), value(v) {
+            }
+        };
+
+        /// 字节数组类型别名
+        using ByteArray = std::vector<uint8_t>;
+
+        /// 非拥有者字节视图（注意：读取时本实现会分配内存）
+        struct ByteView {
+            const uint8_t *data = nullptr;
+            size_t size = 0;
+        };
+
+        /// @brief 携带 Protocol 的值类型
+        /// @tparam T 实际值类型
+        /// @tparam Protocol 序列化策略
+        template<typename T, typename Protocol>
+        struct PVal {
+            T value;
+
+            PVal() = default;
+
+            explicit PVal(const T &v) : value(v) {
+            }
+
+            explicit PVal(T &&v) : value(std::move(v)) {
+            }
+
+            // 隐式转换，方便访问 value
+            explicit operator T &() { return value; }
+            explicit operator const T &() const { return value; }
+
+            T &get() { return value; }
+            const T &get() const { return value; }
+        };
+
+        struct CVal {
+            virtual ~CVal() = default;
+
+            virtual void write(io::Writer &w, const std::type_info &protocol) const = 0;
+
+            virtual void read(io::Reader &r, const std::type_info &protocol) = 0;
         };
     }
 
@@ -420,6 +433,13 @@ namespace bsp {
         struct DefaultProtocol<types::PVal<T, Protocol> > {
             using type = Protocol;
         };
+
+        template<typename T>
+            requires std::is_base_of_v<types::CVal, T>
+        struct DefaultProtocol<T> {
+            using type = CVal; // 统一所有派生类型
+        };
+
 
         /// @brief 对于满足 schema::SchemaType 的类型，默认协议为 proto::Schema
         template<schema::SchemaType T>
@@ -817,6 +837,17 @@ namespace bsp {
 
             static void read(io::Reader &r, types::PVal<T, ProtocolT> &out) {
                 Serializer<T, Protocol>::read(r, out.value);
+            }
+        };
+
+        template<typename T, typename Protocol> requires std::is_base_of_v<types::CVal, T>
+        struct Serializer<T, Protocol> {
+            static void write(io::Writer &w, const types::CVal &v) {
+                v.write(w, typeid(Protocol));
+            }
+
+            static void read(io::Reader &r, types::CVal &out) {
+                out.read(r, typeid(Protocol));
             }
         };
 
