@@ -336,6 +336,8 @@ bsp::read(r, pt);
 
 ### 8.1 Custom DefaultProtocol
 
+Define in the `bsp::proto` namespace for global usage
+
 ```c++
 namespace bsp::proto {
     template<>
@@ -346,6 +348,8 @@ namespace bsp::proto {
 ```
 
 ### 8.2 Custom Serializer
+
+Define in the `bsp::serializer` namespace for global usage
 
 ```c++
 struct Encrypt {};
@@ -364,6 +368,33 @@ namespace bsp::serialize {
     };
 }
 ```
+
+---
+
+## 9. I/O Interface
+
+```c++
+bsp::io::Writer w(os);
+bsp::io::Reader r(is);
+
+// Functional style
+bsp::write(w, value);                     // Uses DefaultProtocol_t<T>
+bsp::write<bsp::proto::Varint>(w, value); // Specify protocol
+
+// Object-oriented style (equivalent)
+w.write(value);                           // Equivalent functional call
+w.write<bsp::proto::Varint>(value);       // Equivalent with explicit protocol
+
+// Functional style
+bsp::read(r, value);
+bsp::read<bsp::proto::Fixed<4>>(r, value);
+
+// Object-oriented style (equivalent)
+r.read(value);
+r.read<bsp::proto::Fixed<4>>(value);
+```
+
+> Both functional and object-oriented styles are supported. Choose based on preference or context.
 
 ---
 

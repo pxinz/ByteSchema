@@ -113,11 +113,11 @@ namespace bsp {
 
             Option() = default;
 
-            Option(const T &v) : has_value(true), value(v) {
+            explicit Option(const T &v) : has_value(true), value(v) {
             }
         };
 
-        /// 字节数组类型别名（可序列化为变长）
+        /// 字节数组类型别名
         using ByteArray = std::vector<uint8_t>;
 
         /// 非拥有者字节视图（注意：读取时本实现会分配内存）
@@ -150,54 +150,10 @@ namespace bsp {
         };
     }
 
-    // I/O 包装器
-    namespace io {
-        /// @brief 写入器
-        ///
-        /// 封装 std::ostream，并提供按字节写入的便捷接口。
-        struct Writer {
-            std::ostream &os;
+    /// 抽象接口定义
+    /// @{
 
-            explicit Writer(std::ostream &o) : os(o) {
-            }
-
-            /// @brief 写入字节数组
-            /// @param data 指向源字节
-            /// @param n 写入字节数
-            void writeBytes(const uint8_t *data, size_t n) {
-                os.write(reinterpret_cast<const char *>(data), static_cast<std::streamsize>(n));
-            }
-
-            /// @brief 写入单个字节
-            void writeByte(uint8_t b) { writeBytes(&b, 1); }
-        };
-
-        /// @brief 读取器
-        ///
-        /// 封装 std::istream，并在发生 EOF/IO 错误时抛出异常。
-        struct Reader {
-            std::istream &is;
-
-            explicit Reader(std::istream &i) : is(i) {
-            }
-
-            /// @brief 从流中读取指定数量的字节到 buffer
-            /// @throws error::UnexpectedEOF 当读取失败或到达流尾
-            void readBytes(uint8_t *data, size_t n) {
-                is.read(reinterpret_cast<char *>(data), static_cast<std::streamsize>(n));
-                if (!is) throw error::UnexpectedEOF("unexpected EOF while reading");
-            }
-
-            /// @brief 读取单字节
-            uint8_t readByte() {
-                uint8_t b;
-                readBytes(&b, 1);
-                return b;
-            }
-        };
-    }
-
-    // 协议标签
+    // 协议标签定义
     namespace proto {
         /// @brief 固定宽度协议标签
         /// @tparam N 可选的字节宽度（0 表示使用 Varint/动态处理）
@@ -223,12 +179,188 @@ namespace bsp {
             using type = Default;
         };
 
-        // 针对常见类型的默认协议映射
-        template<>
-        struct DefaultProtocol<void> {
-            using type = Fixed<>;
+        /// @brief 工具别名，获取类型的默认协议
+        template<typename T>
+        using DefaultProtocol_t = DefaultProtocol<T>::type;
+    }
+
+    // 序列化器定义
+    namespace serialize {
+        /// @brief Serializer 模板：针对不同类型和协议提供特化
+        template<typename T, typename Protocol>
+        struct Serializer;
+    }
+
+    // 模式定义
+    namespace schema {
+        /// @brief 结构体字段描述模板
+        /// @tparam Struct 所属结构体类型
+        /// @tparam MemberType 成员字段类型
+        /// @tparam Protocol 成员字段使用的协议标签（默认由 DefaultProtocol 决定）
+        ///
+        /// 用法示例：
+        /// @code
+        /// struct Point { int x; int y; };
+        /// template<> struct Schema<Point> {
+        ///   static constexpr auto fields() {
+        ///     return std::make_tuple(
+        ///       Field<Point, int>("x", &Point::x),
+        ///       Field<Point, int>("y", &Point::y)
+        ///     );
+        ///   }
+        /// };
+        /// @endcode
+        template<typename Struct, typename MemberType, typename Protocol = proto::DefaultProtocol_t<MemberType> >
+        struct Field {
+            using member_type = MemberType;
+            using protocol_type = Protocol;
+            const char *name;
+            MemberType Struct::*ptr;
+
+            constexpr Field(const char *n, MemberType Struct::*p) : name(n), ptr(p) {
+            }
         };
 
+        /// @brief 用户必须为自定义结构体特化该模板以提供 fields() 函数
+        template<typename T>
+        struct Schema; // 用户必须特化
+
+        /// @brief trait：判断类型是否定义了 Schema<T>::fields()
+        template<typename T, typename = void>
+        struct has_schema : std::false_type {
+        };
+
+        template<typename T>
+        struct has_schema<T, std::void_t<decltype(Schema<T>::fields())> > : std::true_type {
+        };
+
+        /// @brief 概念：满足 SchemaType 意味着可以进行结构体序列化
+        template<typename T>
+        concept SchemaType = requires
+        {
+            { Schema<T>::fields() };
+        };
+    }
+
+    /// @}
+
+    // I/O 包装器
+    namespace io {
+        /// @brief 写入器
+        ///
+        /// 封装 std::ostream，并提供按字节写入的便捷接口。
+        struct Writer {
+            std::ostream &os;
+
+            explicit Writer(std::ostream &o) : os(o) {
+            }
+
+            /// @brief 写入字节数组
+            /// @param data 指向源字节
+            /// @param n 写入字节数
+            void writeBytes(const uint8_t *data, size_t n) {
+                os.write(reinterpret_cast<const char *>(data), static_cast<std::streamsize>(n));
+            }
+
+            /// @brief 写入单个字节
+            void writeByte(uint8_t b) { writeBytes(&b, 1); }
+
+            /// @brief 写入数据体，相当于write(w, v)
+            template<typename Protocol, typename T>
+            inline void write(const T &v) {
+                serialize::Serializer<T, Protocol>::write(this, v);
+            }
+
+            /// @brief 写入数据体，相当于write(w, v)
+            template<typename T>
+            inline void write(const T &v) {
+                serialize::Serializer<T, proto::DefaultProtocol_t<T> >::write(this, v);
+            }
+        };
+
+        /// @brief 读取器
+        ///
+        /// 封装 std::istream，并在发生 EOF/IO 错误时抛出异常。
+        struct Reader {
+            std::istream &is;
+
+            explicit Reader(std::istream &i) : is(i) {
+            }
+
+            /// @brief 从流中读取指定数量的字节到 buffer
+            /// @throws error::UnexpectedEOF 当读取失败或到达流尾
+            void readBytes(uint8_t *data, size_t n) {
+                is.read(reinterpret_cast<char *>(data), static_cast<std::streamsize>(n));
+                if (!is) throw error::UnexpectedEOF("unexpected EOF while reading");
+            }
+
+            /// @brief 读取单字节
+            uint8_t readByte() {
+                uint8_t b;
+                readBytes(&b, 1);
+                return b;
+            }
+
+            /// @brief 读出数据体，相当于read(r, out)
+            template<typename Protocol, typename T>
+            inline void read(T &out) {
+                serialize::Serializer<T, Protocol>::read(this, out);
+            }
+
+            /// @brief 读出数据体，相当于read(r, out)
+            template<typename T>
+            inline void read(T &out) {
+                serialize::Serializer<T, proto::DefaultProtocol_t<T> >::read(this, out);
+            }
+        };
+    }
+
+    /// 具体实现
+    /// @{
+
+    // 工具函数
+    namespace utils {
+        /// @brief ZigZag 编码（将有符号整数映射为无符号以便变长编码）
+        inline uint64_t zigzag_encode(int64_t x) {
+            return (static_cast<uint64_t>(x) << 1) ^ static_cast<uint64_t>(x >> 63);
+        }
+
+        /// @brief ZigZag 解码
+        inline int64_t zigzag_decode(uint64_t v) {
+            return static_cast<int64_t>((v >> 1) ^ (~(v & 1) + 1));
+        }
+
+        /// @brief 以 ULEB128 格式写入无符号变长整数
+        inline void write_uleb128(io::Writer &w, uint64_t v) {
+            while (v > 0x7F) {
+                auto b = static_cast<uint8_t>((v & 0x7F) | 0x80);
+                w.writeByte(b);
+                v >>= 7;
+            }
+            w.writeByte(static_cast<uint8_t>(v));
+        }
+
+        /// @brief 从流中读取 ULEB128 编码的无符号变长整数
+        /// @throws error::InvalidVarint 当 varint 过大
+        inline uint64_t read_uleb128(io::Reader &r) {
+            uint64_t res = 0;
+            int shift = 0;
+            while (true) {
+                const uint8_t b = r.readByte();
+                res |= static_cast<uint64_t>(b & 0x7F) << shift;
+                if (!(b & 0x80)) break;
+                shift += 7;
+                if (shift >= 64) {
+                    throw error::InvalidVarint("varint too large");
+                }
+            }
+            return res;
+        }
+    }
+
+    // 默认协议标签指定
+    namespace proto {
+        // 针对常见类型的默认协议映射
         template<>
         struct DefaultProtocol<bool> {
             using type = Fixed<>;
@@ -289,103 +421,6 @@ namespace bsp {
             using type = Protocol;
         };
 
-        /// @brief 工具别名，获取类型的默认协议
-        template<typename T>
-        using DefaultProtocol_t = typename DefaultProtocol<T>::type;
-    }
-
-    // 工具函数
-    namespace utils {
-        /// @brief ZigZag 编码（将有符号整数映射为无符号以便变长编码）
-        inline uint64_t zigzag_encode(int64_t x) {
-            return (static_cast<uint64_t>(x) << 1) ^ static_cast<uint64_t>(x >> 63);
-        }
-
-        /// @brief ZigZag 解码
-        inline int64_t zigzag_decode(uint64_t v) {
-            return static_cast<int64_t>((v >> 1) ^ (~(v & 1) + 1));
-        }
-
-        /// @brief 以 ULEB128 格式写入无符号变长整数
-        inline void write_uleb128(io::Writer &w, uint64_t v) {
-            while (v > 0x7F) {
-                uint8_t b = static_cast<uint8_t>((v & 0x7F) | 0x80);
-                w.writeByte(b);
-                v >>= 7;
-            }
-            w.writeByte(static_cast<uint8_t>(v));
-        }
-
-        /// @brief 从流中读取 ULEB128 编码的无符号变长整数
-        /// @throws error::InvalidVarint 当 varint 过大
-        inline uint64_t read_uleb128(io::Reader &r) {
-            uint64_t res = 0;
-            int shift = 0;
-            while (true) {
-                uint8_t b = r.readByte();
-                res |= uint64_t(b & 0x7F) << shift;
-                if (!(b & 0x80)) break;
-                shift += 7;
-                if (shift >= 64) {
-                    throw error::InvalidVarint("varint too large");
-                }
-            }
-            return res;
-        }
-    }
-
-    // 模式定义
-    namespace schema {
-        /// @brief 结构体字段描述模板
-        /// @tparam Struct 所属结构体类型
-        /// @tparam MemberType 成员字段类型
-        /// @tparam Protocol 成员字段使用的协议标签（默认由 DefaultProtocol 决定）
-        ///
-        /// 用法示例：
-        /// @code
-        /// struct Point { int x; int y; };
-        /// template<> struct Schema<Point> {
-        ///   static constexpr auto fields() {
-        ///     return std::make_tuple(
-        ///       Field<Point, int>("x", &Point::x),
-        ///       Field<Point, int>("y", &Point::y)
-        ///     );
-        ///   }
-        /// };
-        /// @endcode
-        template<typename Struct, typename MemberType, typename Protocol = proto::DefaultProtocol_t<MemberType> >
-        struct Field {
-            using member_type = MemberType;
-            using protocol_type = Protocol;
-            const char *name;
-            MemberType Struct::*ptr;
-
-            constexpr Field(const char *n, MemberType Struct::*p) : name(n), ptr(p) {
-            }
-        };
-
-        /// @brief 用户必须为自定义结构体特化该模板以提供 fields() 函数
-        template<typename T>
-        struct Schema; // 用户必须特化
-
-        /// @brief trait：判断类型是否定义了 Schema<T>::fields()
-        template<typename T, typename = void>
-        struct has_schema : std::false_type {
-        };
-
-        template<typename T>
-        struct has_schema<T, std::void_t<decltype(Schema<T>::fields())> > : std::true_type {
-        };
-
-        /// @brief 概念：满足 SchemaType 意味着可以进行结构体序列化
-        template<typename T>
-        concept SchemaType = requires
-        {
-            { Schema<T>::fields() };
-        };
-    }
-
-    namespace proto {
         /// @brief 对于满足 schema::SchemaType 的类型，默认协议为 proto::Schema
         template<schema::SchemaType T>
         struct DefaultProtocol<T> {
@@ -393,12 +428,8 @@ namespace bsp {
         };
     }
 
-    // 不可变类型序列化
+    // 具体序列化器
     namespace serialize {
-        /// @brief Serializer 模板：针对不同类型和协议提供特化
-        template<typename T, typename Protocol>
-        struct Serializer;
-
         /// @name 基础类型序列化
         /// @{
 
@@ -421,12 +452,12 @@ namespace bsp {
                 constexpr size_t size = sizeof(T);
                 if (GlobalOptions::instance().endian == std::endian::little) {
                     for (size_t i = 0; i < size; ++i) {
-                        uint8_t b = static_cast<uint8_t>((v >> (8 * i)) & 0xFF);
+                        auto b = static_cast<uint8_t>((v >> (8 * i)) & 0xFF);
                         w.writeByte(b);
                     }
                 } else {
                     for (size_t i = 0; i < size; ++i) {
-                        uint8_t b = static_cast<uint8_t>((v >> (8 * (size - 1 - i))) & 0xFF);
+                        auto b = static_cast<uint8_t>((v >> (8 * (size - 1 - i))) & 0xFF);
                         w.writeByte(b);
                     }
                 }
@@ -845,6 +876,8 @@ namespace bsp {
 
         /// @}
     }
+
+    /// @}
 
     // 模式宏
 #define BSP_FIELD(TYPE, MEMBER) \

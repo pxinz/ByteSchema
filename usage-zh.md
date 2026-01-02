@@ -337,6 +337,8 @@ bsp::read(r, pt);
 
 ### 8.1 自定义 DefaultProtocol
 
+在 `bsp::proto` 命名空间下定义，即可处处使用
+
 ```c++
 namespace bsp::proto {
     template<>
@@ -347,6 +349,8 @@ namespace bsp::proto {
 ```
 
 ### 8.2 自定义 Serializer
+
+在 `bsp::serializer` 命名空间下定义，即可处处使用
 
 ```c++
 struct Encrypt {};
@@ -374,11 +378,19 @@ namespace bsp::serialize {
 bsp::io::Writer w(os);
 bsp::io::Reader r(is);
 
-bsp::write(w, value);                   // 使用 DefaultProtocol_t<T>
+// 函数式编程
+bsp::write(w, value);                     // 使用 DefaultProtocol_t<T>
 bsp::write<bsp::proto::Varint>(w, value); // 指定协议
+// 面向对象的等价写法
+w.write(value);
+w.write<bsp::proto::Varint>(value);
 
+// 函数式编程
 bsp::read(r, value);
-bsp::read<bsp::proto::Fixed<4>>(r, value);
+bsp::read<bsp::proto::Fixed<4> >(r, value);
+// 面向对象的等价写法
+r.read(value);
+r.read<bsp::proto::Fixed<4> >(r, value);
 ```
 
 ---
