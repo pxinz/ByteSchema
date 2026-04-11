@@ -3,4 +3,5 @@ project(byteschema)
 
 set(CMAKE_CXX_STANDARD 20)
 
-add_library(byteschema STATIC include/bsp.hpp)
+add_library(byteschema STATIC
+        include/bsp.hpp)
