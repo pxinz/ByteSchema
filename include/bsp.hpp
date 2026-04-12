@@ -737,7 +737,7 @@ namespace bsp {
             using IgnoreErrors = ErrorPolicyMode<ErrorPolicy::IGNORE>;
 
             template<typename InnerProto, typename... Modifiers>
-            struct WithOptions {
+            struct WithOptions : WrapperProto {
                 using Inner = InnerProto;
                 using modifiers = std::tuple<Modifiers...>;
             };
@@ -764,7 +764,7 @@ namespace bsp {
             using class_type = Class;
 
             const char *name;
-            FieldType Class::*ptr;
+            field_type Class::*ptr;
         };
 
         template<typename T, typename Version = proto::Default>
@@ -1473,7 +1473,7 @@ namespace bsp {
                 }
             }
 
-            static void read(io::Reader auto &r, std::map<K, V> &out) {
+            static void read(io::Reader auto &r, std::unordered_map<K, V> &out) {
                 detail::DepthGuard g;
 
                 const size_t size = detail::read_varint<size_t>(r);
@@ -1506,7 +1506,7 @@ namespace bsp {
                 }
             }
 
-            static void read(io::Reader auto &r, std::map<K, V> &out) {
+            static void read(io::Reader auto &r, std::unordered_map<K, V> &out) {
                 detail::DepthGuard g;
 
                 out.clear();
@@ -2140,7 +2140,7 @@ namespace bsp {
 // Register Field with Protocol
 // 指定协议的字段注册
 #define BSP_FIELD_P(F, P) \
-    ::bsp::schema::Field<Type, decltype(Type::F), P>{#F, &Type::F}
+    ::bsp::schema::Field<Type, decltype(std::declval<Type>().F), P>{#F, &Type::F}
 
 // Register Field with Default Protocol
 // 默认协议的字段注册
