@@ -56,7 +56,8 @@ Design goals
 // TODOs now:
 // High
 // Medium
-// - Document & Examples
+// - Examples
+// - Better Compile-Time asserts
 // Low
 // - Better code style (long-term)
 // - Better comments (long-term)
@@ -173,13 +174,13 @@ namespace bsp {
             size_t actual;
             const char *context;
 
-            explicit EOFError(size_t exp, size_t act = 0, const char *ctx = "")
+            explicit EOFError(const size_t exp, const size_t act = 0, const char *ctx = "")
                 : Error(build_message(exp, act, ctx)),
                   expected(exp), actual(act), context(ctx) {
             }
 
         private:
-            static std::string build_message(size_t exp, size_t act, const char *ctx) {
+            static std::string build_message(const size_t exp, const size_t act, const char *ctx) {
                 std::string msg = "bsp: unexpected EOF";
                 if (ctx && *ctx) {
                     msg += " while ";
@@ -196,7 +197,7 @@ namespace bsp {
             size_t current_depth;
             size_t max_allowed;
 
-            DepthExceeded(size_t cur, size_t maxd)
+            DepthExceeded(const size_t cur, const size_t maxd)
                 : Error("bsp: container recursion depth exceeded (current=" +
                         std::to_string(cur) + ", max=" + std::to_string(maxd) + ")"),
                   current_depth(cur), max_allowed(maxd) {
@@ -208,7 +209,7 @@ namespace bsp {
             size_t max_allowed;
             const char *container_type; // "vector", "map", etc.
 
-            ContainerTooLarge(size_t req, size_t maxd, const char *type)
+            ContainerTooLarge(const size_t req, const size_t maxd, const char *type)
                 : Error("bsp: container size exceeds limit (requested=" +
                         std::to_string(req) + ", max=" + std::to_string(maxd) +
                         ", type=" + type + ")"),
@@ -220,7 +221,7 @@ namespace bsp {
             size_t requested_size;
             size_t max_allowed;
 
-            StringTooLarge(size_t req, size_t maxd)
+            StringTooLarge(const size_t req, const size_t maxd)
                 : Error("bsp: string size exceeds limit (requested=" +
                         std::to_string(req) + ", max=" + std::to_string(maxd) + ")"),
                   requested_size(req), max_allowed(maxd) {
@@ -231,7 +232,7 @@ namespace bsp {
             int max_bits; // 例如 64
             const char *type_name; // "uint32_t"
 
-            VarintOverflow(int bits, const char *tname)
+            VarintOverflow(const int bits, const char *tname)
                 : Error("bsp: varint overflow (max bits=" + std::to_string(bits) +
                         ", type=" + tname + ")"),
                   max_bits(bits), type_name(tname) {
@@ -241,7 +242,7 @@ namespace bsp {
         struct InvalidBool final : Error {
             uint8_t bad_value;
 
-            explicit InvalidBool(uint8_t val)
+            explicit InvalidBool(const uint8_t val)
                 : Error("bsp: invalid bool value " + std::to_string(val)),
                   bad_value(val) {
             }
@@ -251,7 +252,7 @@ namespace bsp {
             size_t index;
             size_t num_alternatives;
 
-            InvalidVariantIndex(size_t idx, size_t num)
+            InvalidVariantIndex(const size_t idx, const size_t num)
                 : Error("bsp: invalid variant index (index=" + std::to_string(idx) +
                         ", alternatives=" + std::to_string(num) + ")"),
                   index(idx), num_alternatives(num) {
@@ -263,7 +264,7 @@ namespace bsp {
             size_t actual_size;
             const char *context;
 
-            FixedSizeMismatch(size_t exp, size_t act, const char *ctx = "")
+            FixedSizeMismatch(const size_t exp, const size_t act, const char *ctx = "")
                 : Error("bsp: forced size mismatch (expected=" + std::to_string(exp) +
                         ", actual=" + std::to_string(act) +
                         (ctx && *ctx ? ", context=" + std::string(ctx) : "") + ")"),
@@ -275,7 +276,7 @@ namespace bsp {
             int64_t value;
             const char *enum_name;
 
-            InvalidEnumValue(int64_t val, const char *name)
+            InvalidEnumValue(const int64_t val, const char *name)
                 : Error("bsp: invalid enum value " + std::to_string(val) +
                         " for enum " + name),
                   value(val), enum_name(name) {
@@ -593,11 +594,11 @@ namespace bsp {
         struct PVal {
             T value;
 
-            explicit operator T &() { return value; }
-            explicit operator const T &() const { return value; }
+            operator T &() { return value; }
+            operator const T &() const { return value; }
 
-            explicit operator T *() { return &value; }
-            explicit operator const T *() const { return &value; }
+            operator T *() { return &value; }
+            operator const T *() const { return &value; }
 
             T *operator->() { return &value; }
             const T *operator->() const { return &value; }
@@ -1373,7 +1374,6 @@ namespace bsp {
             static constexpr size_t byte_count = (N + 7) / 8;
 
             static void write(io::Writer auto &w, const std::bitset<N> &v) {
-                // 将 bitset 按字节打包，每字节 8 位，低位对应小索引
                 for (size_t i = 0; i < byte_count; ++i) {
                     uint8_t byte = 0;
                     for (size_t bit = 0; bit < 8 && (i * 8 + bit) < N; ++bit) {
@@ -1622,10 +1622,12 @@ namespace bsp {
         template<class... Ts>
         struct Serializer<std::tuple<Ts...>, proto::Fixed<> > {
             static void write(io::Writer auto &w, const std::tuple<Ts...> &v) {
+                detail::DepthGuard g;
                 write_impl(w, v, std::index_sequence_for<Ts...>{});
             }
 
             static void read(io::Reader auto &r, std::tuple<Ts...> &out) {
+                detail::DepthGuard g;
                 read_impl(r, out, std::index_sequence_for<Ts...>{});
             }
 
@@ -1810,7 +1812,7 @@ namespace bsp {
         };
 
         template<types::trivially_serializable T>
-        struct Serializer<std::vector<T>, proto::Varint> {
+        struct Serializer<std::vector<T>, proto::Trivial> {
             static void write(io::Writer auto &w, const std::vector<T> &v) {
                 detail::DepthGuard g;
                 size_t count = v.size();
@@ -1830,23 +1832,53 @@ namespace bsp {
             }
         };
 
-        template<types::trivially_serializable T, size_t N>
-        struct Serializer<std::vector<T>, proto::Fixed<N> > {
-            static void write(io::Writer auto &w, const std::vector<T> &v) {
+        template<>
+        struct Serializer<std::vector<bool>, proto::Trivial> {
+            static void write(io::Writer auto &w, const std::vector<bool> &v) {
                 detail::DepthGuard g;
-                if (v.size() != N) throw errors::FixedSizeMismatch(N, v.size(), "std::vector<trivial> fixed");
-                w.write_bytes(reinterpret_cast<const uint8_t *>(v.data()), N * sizeof(T));
+
+                const size_t count = v.size();
+                detail::write_varint(w, count);
+
+                const size_t byte_count = (count + 7) / 8;
+                for (size_t i = 0; i < byte_count; ++i) {
+                    uint8_t byte = 0;
+                    const size_t base = i * 8;
+                    for (size_t bit = 0; bit < 8 && (base + bit) < count; ++bit) {
+                        if (v[base + bit]) {
+                            byte |= static_cast<uint8_t>(1u << bit);
+                        }
+                    }
+                    w.write_byte(byte);
+                }
             }
 
-            static void read(io::Reader auto &r, std::vector<T> &out) {
+            static void read(io::Reader auto &r, std::vector<bool> &out) {
                 detail::DepthGuard g;
-                out.resize(N);
-                r.read_bytes(reinterpret_cast<uint8_t *>(out.data()), N * sizeof(T));
+
+                const size_t count = detail::read_varint<size_t>(r);
+                if (options::current().error_policy <= ErrorPolicy::MEDIUM) {
+                    if (count > options::current().max_container_size) {
+                        throw errors::ContainerTooLarge(count,
+                                                        options::current().max_container_size.value(),
+                                                        "std::vector<bool> (trivial)");
+                    }
+                }
+
+                out.resize(count);
+                const size_t byte_count = (count + 7) / 8;
+                for (size_t i = 0; i < byte_count; ++i) {
+                    const uint8_t byte = r.read_byte();
+                    const size_t base = i * 8;
+                    for (size_t bit = 0; bit < 8 && (base + bit) < count; ++bit) {
+                        out[base + bit] = (byte & (1u << bit)) != 0;
+                    }
+                }
             }
         };
 
         template<types::trivially_serializable T, size_t N>
-        struct Serializer<std::array<T, N>, proto::Fixed<> > {
+        struct Serializer<std::array<T, N>, proto::Trivial> {
             static void write(io::Writer auto &w, const std::array<T, N> &v) {
                 detail::DepthGuard g;
                 w.write_bytes(reinterpret_cast<const uint8_t *>(v.data()), N * sizeof(T));
