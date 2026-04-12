@@ -599,7 +599,7 @@ BSP_SCHEMA_V(Message, V2,
     BSP_FIELD(timestamp)
 );
 
-BSP_DEFAULT_PROTOCOL(Point, proto::Schema<V2>);
+BSP_DEFAULT_PROTO(Point, proto::Schema<V2>);
 
 // Specify version when using
 bsp::write<bsp::proto::Schema<V1>>(writer, {0, content, sender});
@@ -700,7 +700,7 @@ When multiple modifiers are present, they are applied left-to-right.
 - `MaxDepth<Policy>`: Modifies `max_depth`.
 - `MaxContainerSize<Policy>`: Modifies `max_container_size`.
 - `MaxStringSize<Policy>`: Modifies `max_string_size`.
-- `ErrorPolicyMod<Value>`: Modifies the error policy.
+- `ErrorPolicyMode<Value>`: Modifies the error policy.
 
 Here, `Policy` should be a `ValueModifier` that describes the numeric change.
 

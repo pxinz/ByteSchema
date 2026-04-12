@@ -584,7 +584,7 @@ BSP_SCHEMA_V(Message, V2,
     BSP_FIELD(timestamp)
 );
 
-BSP_DEFAULT_PROTOCOL(Point, proto::Schema<V2>);
+BSP_DEFAULT_PROTO(Point, proto::Schema<V2>);
 
 // 使用时指定版本
 bsp::write<bsp::proto::Schema<V1>>(writer, {0, content, sender});
@@ -681,7 +681,7 @@ struct WithOptions {};
 - `MaxDepth<Policy>`：修改 `max_depth`。
 - `MaxContainerSize<Policy>`：修改 `max_container_size`。
 - `MaxStringSize<Policy>`：修改 `max_string_size`。
-- `ErrorPolicyMod<Value>`：修改错误策略。
+- `ErrorPolicyMode<Value>`：修改错误策略。
 
 其中，`Policy` 应使用 `ValueModifier` 表示数值更改。
 
