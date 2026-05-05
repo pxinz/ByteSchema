@@ -1,7 +1,7 @@
 #ifndef BSP_TESTS_HPP
 #define BSP_TESTS_HPP
 
-#include "bsp.hpp"
+#include "../include/bsp.hpp"
 
 #include <iostream>
 #include <string>
@@ -52,7 +52,7 @@ namespace bsp::test {
         }
 
         // 运行所有测试用例
-        int run(bool verbose = false) {
+        [[nodiscard]] int run(const bool verbose = false) const {
             int passed = 0;
             int failed = 0;
             int skipped = 0;
@@ -129,19 +129,11 @@ namespace bsp::test {
         return std::make_pair(&writer, &reader);
     }
 
-    template<typename T>
-    T roundtrip(const T &v, context ctx = context::get_default_context()) {
-        using P = proto::DefaultProtocol_t<T>;
-        auto [w, r] = roundtrip_io();
-        write<P>(&w, v, ctx);
-        return read<P>(&r, ctx);
-    }
-
-    template<typename P, typename T>
+    template<typename P = proto::Default, typename T>
     T roundtrip(const T &v, context ctx = context::get_default_context()) {
         auto [w,r] = roundtrip_io();
-        write<P>(&w, v, ctx);
-        return read<P>(&r, ctx);
+        write<P, T>(*w, v, ctx);
+        return read<P, T>(*r, ctx);
     }
 
     // === Test Registration Macro ============================================
@@ -199,7 +191,6 @@ namespace bsp::test {
         auto _b = (b);                                                          \
         if (_a != _b) {                                                         \
             std::cerr << "    ASSERTION FAILED: " << #a << " == " << #b         \
-                      << " (" << _a << " != " << _b << ")"                      \
                       << " at " << __FILE__ << ":" << __LINE__ << std::endl;    \
             return ::bsp::test::result::FAILED;                                 \
         }                                                                       \
@@ -228,7 +219,6 @@ namespace bsp::test {
     } while (false)
 
 // === Main Function ===========================================================
-// 用户只需在 main 中调用 RUN_ALL_TESTS()
 
 #define RUN_ALL_TESTS()                                                         \
     int main(int argc, char *argv[]) {                                          \

@@ -11,6 +11,7 @@
 #include <bitset>
 #include <cmath>
 #include <concepts>
+#include <cstring>
 #include <functional>
 #include <istream>
 #include <map>
@@ -18,6 +19,7 @@
 #include <set>
 #include <unordered_set>
 #include <variant>
+
 
 // =============================================================================
 // BSP (Byte Schema Protocol)
@@ -59,11 +61,6 @@ namespace bsp {
          * @warning May behave differently on different platforms.
          */
         struct Trivial;
-
-        /**
-         * @brief Virtual dispatch encoding via CVal interface.
-         */
-        struct CVal;
 
         /**
          * @brief Compile-time schema with fixed version.
@@ -244,9 +241,13 @@ namespace bsp {
     namespace detail {
     }
 
+    // --- Safety Options ------------------------------------------------------
+    // 防御性配置
+    struct safety;
+
     // --- Session Level Options -----------------------------------------------
     // 会话级配置
-    struct options;
+    struct option;
 
     // --- Process Level Status ------------------------------------------------
     // 单次调用级状态
@@ -374,29 +375,40 @@ namespace bsp {
     // === Context =============================================================
     // 配置与上下文
 
-    // We use MIT License, so you can modify these constexpr options in this file:
+    // This lib is licensed under MIT License.
+    // Therefore, you can modify these constexpr options in this file:
 
     static constexpr inline auto endian = std::endian::big;
     static constexpr inline bool enable_traceback = true;
 
-    // --- Session Level Options -----------------------------------------------
-    // 会话级配置
-    struct options {
+    // --- Safety Options ------------------------------------------------------
+    // 防御性配置
+    struct safety {
         size_t max_depth;
         size_t max_container_size; // Length
         size_t max_string_size; // Byte Size
         errors::error_policy policy;
-        size_t target_schema_version = SIZE_MAX;
 
-        static options default_options;
+        static safety default_safety;
     };
 
-    inline options options::default_options{
+    inline safety safety::default_safety{
         .max_depth = 256,
         .max_container_size = 1 * 1024 * 1024,
         .max_string_size = 4 * 1024 * 1024,
-        .policy = errors::error_policy::MEDIUM,
-        .target_schema_version = 0
+        .policy = errors::error_policy::MEDIUM
+    };
+
+    // --- Session Level Options -----------------------------------------------
+    // 会话级配置
+    struct option {
+        size_t target_schema_version;
+
+        static option default_option;
+    };
+
+    inline option option::default_option{
+        .target_schema_version = SIZE_MAX
     };
 
     // --- Process Level Status ------------------------------------------------
@@ -408,7 +420,8 @@ namespace bsp {
     // --- Context -------------------------------------------------------------
     // 上下文
     struct context {
-        options opt;
+        safety sf;
+        option opt;
         status st;
         std::shared_ptr<errors::traceback> traceback;
 
@@ -419,21 +432,25 @@ namespace bsp {
             return *traceback;
         }
 
-        template<bool GetDeeper, bool RollbackOpts, errors::trace_frame_generator FrameFn>
+        template<bool GetDeeper,
+            bool RollbackSafety,
+            bool RollbackOpts,
+            errors::trace_frame_generator FrameFn>
         struct scope_guard;
 
-        template<bool GetDeeper, bool RollbackOpts, errors::trace_frame_generator FrameFn>
-        static scope_guard<GetDeeper, RollbackOpts, FrameFn> guard(context &ctx, FrameFn &&frame_fn);
-
-        template<bool GetDeeper, bool RollbackOpts, errors::trace_frame_generator FrameFn>
-        scope_guard<GetDeeper, RollbackOpts, FrameFn> guard(FrameFn &&frame_fn);
+        template<bool GetDeeper,
+            bool RollbackSafety = false,
+            bool RollbackOpts = false,
+            errors::trace_frame_generator FrameFn>
+        scope_guard<GetDeeper, RollbackSafety, RollbackOpts, FrameFn> guard(FrameFn &&frame_fn);
 
         static context get_default_context();
     };
 
     inline context context::get_default_context() {
         return context{
-            .opt = options::default_options,
+            .sf = safety::default_safety,
+            .opt = option::default_option,
             .st = status{},
             .traceback = nullptr
         };
@@ -598,27 +615,27 @@ namespace bsp {
             return make(
                 code::container_too_large, ctx,
                 detail::concat("container size ", actual,
-                               " larger than limit=", ctx.opt.max_container_size, " children"));
+                               " larger than limit=", ctx.sf.max_container_size, " children"));
         }
 
         inline error string_too_large(const size_t actual, context &ctx) {
             return make(
                 code::string_too_large, ctx,
                 detail::concat("string size ", actual,
-                               " larget than limit=", ctx.opt.max_string_size, " bytes"));
+                               " larger than limit=", ctx.sf.max_string_size, " bytes"));
         }
     }
 
     // === RAII Guards =========================================================
     // RAII 限制工具
-    template<bool GetDeeper, bool RollbackOpts, errors::trace_frame_generator FrameFn>
+    template<bool GetDeeper, bool RollbackSafety, bool RollbackOpts, errors::trace_frame_generator FrameFn>
     struct context::scope_guard {
-        // 该字段应该永远被传入，而不是自行创建
         const std::reference_wrapper<context> ctx;
         [[no_unique_address, maybe_unused]] FrameFn traceback_frame_fn;
 
     private:
-        [[maybe_unused]] options origin_opt;
+        [[maybe_unused]] safety origin_sf;
+        [[maybe_unused]] option origin_opt;
         [[maybe_unused]] size_t origin_depth;
         [[maybe_unused]] int uncaught_exceptions;
 
@@ -627,10 +644,14 @@ namespace bsp {
                              FrameFn &&frame_fn) : ctx(ctx),
                                                    traceback_frame_fn(std::forward<FrameFn>(frame_fn)) {
             if constexpr (GetDeeper) {
-                if (ctx.st.current_depth + 1 > ctx.opt.max_depth)
-                    throw errors::depth_limit_exceeded(ctx.opt.max_depth, ctx);
+                if (ctx.st.current_depth + 1 > ctx.sf.max_depth)
+                    throw errors::depth_limit_exceeded(ctx.sf.max_depth, ctx);
                 origin_depth = ctx.st.current_depth;
                 ctx.st.current_depth++;
+            }
+
+            if constexpr (RollbackSafety) {
+                origin_sf = ctx.sf;
             }
 
             if constexpr (RollbackOpts) {
@@ -644,6 +665,7 @@ namespace bsp {
 
         ~scope_guard() {
             if constexpr (GetDeeper) ctx.get().st.current_depth = origin_depth;
+            if constexpr (RollbackSafety) ctx.get().sf = origin_sf;
             if constexpr (RollbackOpts) ctx.get().opt = origin_opt;
             if constexpr (enable_traceback)
                 if (std::uncaught_exceptions() > uncaught_exceptions) {
@@ -663,27 +685,16 @@ namespace bsp {
     };
 
     // Usage:
-    // auto g = context::guard<G, R>(ctx, [&] { return traceback_frame; });
-    // Set G to true when the serializer is a container
-    // Set R to true when the serializer may modify the options
-    //
-    // The compiler will optimize it, so the lambda function won't cause runtime cost.
-    // Please enable O2 optimization
-    template<bool GetDeeper, bool RollbackOpts, errors::trace_frame_generator FrameFn>
-    context::scope_guard<GetDeeper, RollbackOpts, FrameFn> context::guard(context &ctx, FrameFn &&frame_fn) {
-        return scope_guard<GetDeeper, RollbackOpts, std::decay_t<FrameFn> >(ctx, std::forward<FrameFn>(frame_fn));
-    }
-
-    // Usage:
     // auto g = ctx.guard<G, R>([&] { return traceback_frame; });
     // Set G to true when the serializer is a container
     // Set R to true when the serializer may modify the options
     //
     // The compiler will optimize it, so the lambda function won't cause runtime cost.
     // Please enable O2 optimization
-    template<bool GetDeeper, bool RollbackOpts, errors::trace_frame_generator FrameFn>
-    context::scope_guard<GetDeeper, RollbackOpts, FrameFn> context::guard(FrameFn &&frame_fn) {
-        return scope_guard<GetDeeper, RollbackOpts, std::decay_t<FrameFn> >(*this, std::forward<FrameFn>(frame_fn));
+    template<bool GetDeeper, bool RollbackSafety, bool RollbackOpts, errors::trace_frame_generator FrameFn>
+    context::scope_guard<GetDeeper, RollbackSafety, RollbackOpts, FrameFn> context::guard(FrameFn &&frame_fn) {
+        return scope_guard<GetDeeper, RollbackSafety, RollbackOpts, std::decay_t<FrameFn> >(
+            *this, std::forward<FrameFn>(frame_fn));
     }
 
 
@@ -832,6 +843,7 @@ namespace bsp {
         struct LimitedReader {
             R &base;
             size_t remaining;
+            bool io_failed = false;
 
             LimitedReader(R &r, const size_t n) : base(r), remaining(n) {
             }
@@ -843,22 +855,34 @@ namespace bsp {
                         remaining,
                         "LimitedReader"
                     );
-                base.read_bytes(buf, n);
-                remaining -= static_cast<size_t>(n);
+                try {
+                    base.read_bytes(buf, n);
+                    remaining -= static_cast<size_t>(n);
+                } catch (...) {
+                    io_failed = true;
+                    throw;
+                }
             }
 
             [[nodiscard]] uint8_t read_byte() {
                 if (remaining == 0)
                     throw errors::unexpected_eof(1, 0, "LimitedReader");
-                --remaining;
-                return base.read_byte();
+                try {
+                    const uint8_t b = base.read_byte();
+                    --remaining;
+                    return b;
+                } catch (...) {
+                    io_failed = true;
+                    throw;
+                }
             }
 
             void skip_remaining() {
-                uint8_t tmp[256];
+                if (io_failed) return;
+                static uint8_t buf[256];
                 while (remaining) {
                     const size_t k = std::min(remaining, static_cast<size_t>(256));
-                    base.read_bytes(tmp, static_cast<std::streamsize>(k));
+                    base.read_bytes(buf, static_cast<std::streamsize>(k));
                     remaining -= k;
                 }
             }
@@ -868,6 +892,7 @@ namespace bsp {
         struct LimitedWriter {
             W &base;
             size_t remaining;
+            bool io_failed = false;
 
             LimitedWriter(W &w, const size_t n) : base(w), remaining(n) {
             }
@@ -878,8 +903,13 @@ namespace bsp {
                         errors::code::fixed_size_mismatch,
                         detail::concat("writing ", n, " bytes to a LimitWriter remaining ", remaining, "bytes")
                     );
-                base.write_bytes(buf, n);
-                remaining -= static_cast<size_t>(n);
+                try {
+                    base.write_bytes(buf, n);
+                    remaining -= static_cast<size_t>(n);
+                } catch (...) {
+                    io_failed = true;
+                    throw;
+                }
             }
 
             void write_byte(const uint8_t b) {
@@ -888,13 +918,22 @@ namespace bsp {
                         errors::code::fixed_size_mismatch,
                         "writing 1 byte to a LimitedWriter remaining 0 byte"
                     );
-                --remaining;
-                base.write_byte(b);
+                try {
+                    base.write_byte(b);
+                    --remaining;
+                } catch (...) {
+                    io_failed = true;
+                    throw;
+                }
             }
 
             void pad_zero() {
+                if (io_failed) return;
+                static uint8_t buf[256] = {};
                 while (remaining) {
-                    write_byte(0);
+                    const size_t k = std::min(remaining, static_cast<size_t>(256));
+                    base.write_bytes(buf, k);
+                    remaining -= k;
                 }
             }
         };
@@ -1066,7 +1105,7 @@ namespace bsp {
         struct WrapperProto {
         };
 
-        struct Default {
+        struct Default : WrapperProto {
         };
 
         struct Custom {
@@ -1087,9 +1126,6 @@ namespace bsp {
         };
 
         struct Trivial {
-        };
-
-        struct CVal {
         };
 
         template<typename Len, typename Inner = Custom>
@@ -1197,7 +1233,7 @@ namespace bsp {
     // 概念
     namespace types {
         // --- Special Serializable --------------------------------------------
-        // 特殊的可序列化
+        // 特殊的可序列化性
 
         // Types which can be serialized by copying memory
         template<typename T>
@@ -1208,10 +1244,11 @@ namespace bsp {
 
         // Types which registered read/write function in type-definition
         template<typename T, typename Proto>
-        concept internal_serializable = requires(io::AnyWriter &w, io::AnyReader &r, const T &cv, T &v, context &ctx)
+        concept internal_serializable = requires(io::AnyWriter &w, io::AnyReader &r, const T &cv, T &v, context &ctx,
+                                                 Proto tag)
         {
-            { T::template write<Proto>(w, cv, ctx) } -> std::same_as<void>;
-            { T::template read<Proto>(r, v, ctx) } -> std::same_as<void>;
+            { T::write(w, cv, ctx, tag) } -> std::same_as<void>;
+            { T::read(r, v, ctx, tag) } -> std::same_as<void>;
         };
 
         // Types which registered default protocol in type-definition
@@ -1227,7 +1264,7 @@ namespace bsp {
 
 
         // --- Common Serializable ---------------------------------------------
-        // 一般的可持续化（检测Serializer实现）
+        // 一般的可序列化性（检测Serializer实现）
 
         // T-P Pairs which can be serialized
         template<typename T, typename Proto>
@@ -1344,6 +1381,14 @@ namespace bsp {
         };
 
 
+        // --- Schema Types ----------------------------------------------------
+        // 模式串
+        template<typename T> requires types::schema_serializable<T>
+        struct DefaultProtocol<T> {
+            using type = Schema<INT_MAX>;
+        };
+
+
         // --- Variable Types --------------------------------------------------
         // 可变类型
         template<typename T>
@@ -1380,7 +1425,7 @@ namespace bsp {
         template<typename T>
             requires std::is_base_of_v<types::CVal, T>
         struct DefaultProtocol<T> {
-            using type = CVal;
+            using type = Custom;
         };
 
 
@@ -1389,6 +1434,18 @@ namespace bsp {
         template<typename T>
             requires (types::trivial_serializable<T> && (sizeof(T) == 1) && !std::integral<T>)
         struct DefaultProtocol<T> {
+            using type = Trivial;
+        };
+
+        template<typename T>
+            requires (types::trivial_serializable<T> && (sizeof(T) == 1) && !std::integral<T>)
+        struct DefaultProtocol<std::vector<T> > {
+            using type = Trivial;
+        };
+
+        template<typename T, size_t N>
+            requires (types::trivial_serializable<T> && (sizeof(T) == 1) && !std::integral<T>)
+        struct DefaultProtocol<std::array<T, N> > {
             using type = Trivial;
         };
 
@@ -1423,7 +1480,7 @@ namespace bsp {
         template<std::unsigned_integral T>
         [[nodiscard]] T read_varint(io::Reader auto &r, const bool overflow_error) {
             T result = 0;
-            int shift = 0;
+            size_t shift = 0;
 
             while (true) {
                 if (overflow_error)
@@ -1529,7 +1586,7 @@ namespace bsp {
         // --- Compile-Time Tools ----------------------------------------------
         // 编译时工具
         template<typename T>
-        constexpr const char *literal_name() {
+        constexpr const char *type_name_of() {
             if constexpr (std::is_same_v<T, bool>) return "bool";
             else if constexpr (std::is_signed_v<T>) {
                 switch (sizeof(T)) {
@@ -1571,12 +1628,12 @@ namespace bsp {
                           const std::string &type_name, const std::string &proto_name) {
             [[maybe_unused]] const char *current_field = nullptr;
 
-            auto g = ctx.guard<true, false>([&] {
+            auto g = ctx.guard<true, false, false>([&] {
                 return errors::value_frame{
                     .type = type_name,
                     .proto = proto_name,
                     .child_label = current_field
-                                       ? std::optional(detail::concat("Field \"", current_field, "\""))
+                                       ? std::optional(concat("Field \"", current_field, "\""))
                                        : std::nullopt,
                     .details = detail::concat("exact version ", entry.version)
                 };
@@ -1601,12 +1658,12 @@ namespace bsp {
                          const std::string &type_name, const std::string &proto_name) {
             [[maybe_unused]] const char *current_field = nullptr;
 
-            auto g = ctx.guard<true, false>([&] {
+            auto g = ctx.guard<true, false, false>([&] {
                 return errors::value_frame{
                     .type = type_name,
                     .proto = proto_name,
                     .child_label = current_field
-                                       ? std::optional(detail::concat("Field \"", current_field, "\""))
+                                       ? std::optional(concat("Field \"", current_field, "\""))
                                        : std::nullopt,
                     .details = detail::concat("exact version ", entry.version)
                 };
@@ -1640,13 +1697,13 @@ namespace bsp {
         template<>
         struct Serializer<bool, proto::Fixed<> > {
             static void write(io::Writer auto &w, const bool &v, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame("bool", "Fixed<>"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame("bool", "Fixed<>"); });
                 w.write_byte(v);
             }
 
             static void read(io::Reader auto &r, bool &out, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame("bool", "Fixed<>"); });
-                if (ctx.opt.policy <= errors::error_policy::STRICT) {
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame("bool", "Fixed<>"); });
+                if (ctx.sf.policy <= errors::error_policy::STRICT) {
                     const uint8_t b = r.read_byte();
                     if (b > 1)
                         throw errors::invalid_bool(b, ctx);
@@ -1660,16 +1717,16 @@ namespace bsp {
         // Integral
         template<std::integral T>
         struct Serializer<T, proto::Fixed<> > {
-            static constexpr const char *t_str = detail::literal_name<T>();
+            static constexpr const char *t_str = detail::type_name_of<T>();
 
             static void write(io::Writer auto &w, const T &v, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame(t_str, "Fixed<>"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame(t_str, "Fixed<>"); });
                 const auto x = detail::adapt_endian(v);
                 w.write_bytes(reinterpret_cast<const uint8_t *>(&x), sizeof(T));
             }
 
             static void read(io::Reader auto &r, T &out, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame(t_str, "Fixed<>"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame(t_str, "Fixed<>"); });
                 T x;
                 r.read_bytes(reinterpret_cast<uint8_t *>(&x), sizeof(T));
                 out = detail::adapt_endian(x);
@@ -1680,16 +1737,16 @@ namespace bsp {
         // Not affected by endian
         template<std::unsigned_integral T>
         struct Serializer<T, proto::Varint> {
-            static constexpr const char *t_str = detail::literal_name<T>();
+            static constexpr const char *t_str = detail::type_name_of<T>();
 
             static void write(io::Writer auto &w, const T &v, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame(t_str, "Varint"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame(t_str, "Varint"); });
                 detail::write_varint(w, v);
             }
 
             static void read(io::Reader auto &r, T &out, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame(t_str, "Varint"); });
-                out = detail::read_varint<T>(r, ctx.opt.policy <= errors::error_policy::MEDIUM);
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame(t_str, "Varint"); });
+                out = detail::read_varint<T>(r, ctx.sf.policy <= errors::error_policy::MEDIUM);
             }
         };
 
@@ -1697,17 +1754,17 @@ namespace bsp {
         // Not affected by endian
         template<std::signed_integral T>
         struct Serializer<T, proto::Varint> {
-            static constexpr const char *t_str = detail::literal_name<T>();
+            static constexpr const char *t_str = detail::type_name_of<T>();
 
             static void write(io::Writer auto &w, const T &v, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame(t_str, "Varint"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame(t_str, "Varint"); });
                 detail::write_varint(w, detail::zigzag_encode(v));
             }
 
             static void read(io::Reader auto &r, T &out, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame(t_str, "Varint"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame(t_str, "Varint"); });
                 out = detail::zigzag_decode(
-                    detail::read_varint<std::make_unsigned_t<T> >(r, ctx.opt.policy <= errors::error_policy::MEDIUM));
+                    detail::read_varint<std::make_unsigned_t<T> >(r, ctx.sf.policy <= errors::error_policy::MEDIUM));
             }
         };
 
@@ -1715,16 +1772,16 @@ namespace bsp {
         template<std::floating_point T> requires std::numeric_limits<T>::is_iec559
         struct Serializer<T, proto::Fixed<> > {
             using U = std::conditional_t<sizeof(T) == 4, uint32_t, uint64_t>;
-            static constexpr const char *t_str = detail::literal_name<T>();
+            static constexpr const char *t_str = detail::type_name_of<T>();
 
             static void write(io::Writer auto &w, const T &v, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame(t_str, "Fixed<>"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame(t_str, "Fixed<>"); });
                 const U x = detail::adapt_endian(std::bit_cast<U>(v));
                 w.write_bytes(reinterpret_cast<const uint8_t *>(&x), sizeof(T));
             }
 
             static void read(io::Reader auto &r, T &out, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame(t_str, "Fixed<>"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame(t_str, "Fixed<>"); });
                 U x;
                 r.read_bytes(reinterpret_cast<uint8_t *>(&x), sizeof(T));
                 out = std::bit_cast<T>(detail::adapt_endian(x));
@@ -1739,7 +1796,7 @@ namespace bsp {
         template<>
         struct Serializer<std::string, proto::Varint> {
             static void write(io::Writer auto &w, const std::string &v, context &ctx) {
-                auto g = ctx.guard<false, false>([&] {
+                auto g = ctx.guard<false, false, false>([&] {
                     return errors::value_frame{
                         "std::string", "Varint", std::nullopt,
                         detail::concat("length=", v.size())
@@ -1751,16 +1808,16 @@ namespace bsp {
 
             static void read(io::Reader auto &r, std::string &out, context &ctx) {
                 size_t size = 0;
-                auto g = ctx.guard<false, false>([&] {
+                auto g = ctx.guard<false, false, false>([&] {
                     return errors::value_frame{
                         "std::string", "Varint", std::nullopt,
                         detail::concat("length=", size)
                     };
                 });
-                size = detail::read_varint<size_t>(r, ctx.opt.policy <= errors::error_policy::MEDIUM);
+                size = detail::read_varint<size_t>(r, ctx.sf.policy <= errors::error_policy::MEDIUM);
 
-                if (ctx.opt.policy <= errors::error_policy::MEDIUM)
-                    if (size > ctx.opt.max_string_size)
+                if (ctx.sf.policy <= errors::error_policy::MEDIUM)
+                    if (size > ctx.sf.max_string_size)
                         throw errors::string_too_large(size, ctx);
 
                 out.resize(size);
@@ -1774,15 +1831,14 @@ namespace bsp {
             static std::string p_str() { return detail::concat("Fixed<", N, ">"); }
 
             static void write(io::Writer auto &w, const std::string &v, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame("std::string", p_str()); });
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame("std::string", p_str()); });
                 if (v.size() != N) throw errors::fixed_size_mismatch(N, v.size(), ctx);
 
-                detail::write_varint(w, N);
                 w.write_bytes(reinterpret_cast<const uint8_t *>(v.data()), v.size());
             }
 
             static void read(io::Reader auto &r, std::string &out, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame("std::string", p_str()); });
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame("std::string", p_str()); });
 
                 out.resize(N);
                 r.read_bytes(reinterpret_cast<uint8_t *>(out.data()), N);
@@ -1794,7 +1850,7 @@ namespace bsp {
         template<>
         struct Serializer<types::bytes, proto::Varint> {
             static void write(io::Writer auto &w, const types::bytes &v, context &ctx) {
-                auto g = ctx.guard<false, false>([&] {
+                auto g = ctx.guard<false, false, false>([&] {
                     return errors::value_frame{
                         "types::bytes", "Varint", std::nullopt,
                         detail::concat("length=", v.size())
@@ -1806,16 +1862,16 @@ namespace bsp {
 
             static void read(io::Reader auto &r, types::bytes &out, context &ctx) {
                 size_t size = 0;
-                auto g = ctx.guard<false, false>([&] {
+                auto g = ctx.guard<false, false, false>([&] {
                     return errors::value_frame{
                         "types::bytes", "Varint", std::nullopt,
                         detail::concat("length=", size)
                     };
                 });
-                size = detail::read_varint<size_t>(r, ctx.opt.policy <= errors::error_policy::MEDIUM);
+                size = detail::read_varint<size_t>(r, ctx.sf.policy <= errors::error_policy::MEDIUM);
 
-                if (ctx.opt.policy <= errors::error_policy::MEDIUM)
-                    if (size > ctx.opt.max_string_size)
+                if (ctx.sf.policy <= errors::error_policy::MEDIUM)
+                    if (size > ctx.sf.max_string_size)
                         throw errors::string_too_large(size, ctx);
 
                 out.resize(size);
@@ -1829,13 +1885,13 @@ namespace bsp {
             static std::string p_str() { return detail::concat("Fixed<", N, ">"); }
 
             static void write(io::Writer auto &w, const types::bytes &v, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame("types::bytes", p_str()); });
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame("types::bytes", p_str()); });
                 if (v.size() != N) throw errors::fixed_size_mismatch(N, v.size(), ctx);
                 w.write_bytes(v.data(), v.size());
             }
 
             static void read(io::Reader auto &r, types::bytes &out, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame("types::bytes", p_str()); });
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame("types::bytes", p_str()); });
                 out.resize(N);
                 r.read_bytes(out.data(), N);
             }
@@ -1847,7 +1903,7 @@ namespace bsp {
         struct Serializer<std::vector<T>, proto::Varint> {
             static void write(io::Writer auto &w, const std::vector<T> &v, context &ctx) {
                 size_t index = 0;
-                auto g = ctx.guard<true, false>([&] {
+                auto g = ctx.guard<true, false, false>([&] {
                     return errors::value_frame{
                         "std::vector", "Varint", detail::concat("Elem ", index),
                         detail::concat("length=", v.size())
@@ -1863,16 +1919,16 @@ namespace bsp {
             static void read(io::Reader auto &r, std::vector<T> &out, context &ctx) {
                 size_t index = 0;
                 size_t size = 0;
-                auto g = ctx.guard<true, false>([&] {
+                auto g = ctx.guard<true, false, false>([&] {
                     return errors::value_frame{
                         "std::vector", "Varint", detail::concat("Elem ", index),
                         detail::concat("length=", size)
                     };
                 });
 
-                size = detail::read_varint<size_t>(r, ctx.opt.policy <= errors::error_policy::MEDIUM);
-                if (ctx.opt.policy <= errors::error_policy::MEDIUM)
-                    if (size > ctx.opt.max_container_size) throw errors::container_too_large(size, ctx);
+                size = detail::read_varint<size_t>(r, ctx.sf.policy <= errors::error_policy::MEDIUM);
+                if (ctx.sf.policy <= errors::error_policy::MEDIUM)
+                    if (size > ctx.sf.max_container_size) throw errors::container_too_large(size, ctx);
 
                 out.resize(size);
                 for (; index < size; ++index) {
@@ -1888,7 +1944,7 @@ namespace bsp {
 
             static void write(io::Writer auto &w, const std::vector<T> &v, context &ctx) {
                 size_t index = 0;
-                auto g = ctx.guard<true, false>([&] {
+                auto g = ctx.guard<true, false, false>([&] {
                     return errors::value_frame{
                         "std::vector", p_str(), detail::concat("Elem ", index)
                     };
@@ -1902,7 +1958,7 @@ namespace bsp {
 
             static void read(io::Reader auto &r, std::vector<T> &out, context &ctx) {
                 size_t index = 0;
-                auto g = ctx.guard<true, false>([&] {
+                auto g = ctx.guard<true, false, false>([&] {
                     return errors::value_frame{
                         "std::vector", p_str(), detail::concat("Elem ", index)
                     };
@@ -1929,7 +1985,7 @@ namespace bsp {
             }
 
             static void write(io::Writer auto &w, const std::bitset<N> &v, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame(t_str(), "Fixed<>"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame(t_str(), "Fixed<>"); });
 
                 // Serialize as little-endian bytes
                 for (size_t i = 0; i < byte_count; ++i) {
@@ -1943,7 +1999,7 @@ namespace bsp {
             }
 
             static void read(io::Reader auto &r, std::bitset<N> &out, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame(t_str(), "Fixed<>"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame(t_str(), "Fixed<>"); });
 
                 out.reset();
                 for (size_t i = 0; i < byte_count; ++i) {
@@ -1964,9 +2020,9 @@ namespace bsp {
             static void write(io::Writer auto &w, const std::map<K, V> &v, context &ctx) {
                 size_t index = 0;
                 bool is_value = false;
-                auto g = ctx.guard<true, false>([&] {
+                auto g = ctx.guard<true, false, false>([&] {
                     return errors::value_frame{
-                        "std::vector", "Varint", detail::concat(is_value ? "Value " : "Key ", index),
+                        "std::map", "Varint", detail::concat(is_value ? "Value " : "Key ", index),
                         detail::concat("length=", v.size())
                     };
                 });
@@ -1985,16 +2041,16 @@ namespace bsp {
                 size_t index = 0;
                 size_t size = 0;
                 [[maybe_unused]] bool is_value = false;
-                auto g = ctx.guard<true, false>([&] {
+                auto g = ctx.guard<true, false, false>([&] {
                     return errors::value_frame{
                         "std::map", "Varint", detail::concat(is_value ? "Value " : "Key ", index),
                         detail::concat("length=", size)
                     };
                 });
 
-                size = detail::read_varint<size_t>(r, ctx.opt.policy <= errors::error_policy::MEDIUM);
-                if (ctx.opt.policy <= errors::error_policy::MEDIUM)
-                    if (size > ctx.opt.max_container_size) throw errors::container_too_large(size, ctx);
+                size = detail::read_varint<size_t>(r, ctx.sf.policy <= errors::error_policy::MEDIUM);
+                if (ctx.sf.policy <= errors::error_policy::MEDIUM)
+                    if (size > ctx.sf.max_container_size) throw errors::container_too_large(size, ctx);
 
                 out.clear();
                 for (; index < size; index++) {
@@ -2005,7 +2061,7 @@ namespace bsp {
                     V value;
                     DefaultSerializer<V>::read(r, value, ctx);
 
-                    if (ctx.opt.policy <= errors::error_policy::STRICT)
+                    if (ctx.sf.policy <= errors::error_policy::STRICT)
                         if (out.contains(key))
                             throw errors::make(errors::code::duplicate_key, ctx,
                                                std::string("duplicate key in std::map"));
@@ -2024,7 +2080,7 @@ namespace bsp {
             static void write(io::Writer auto &w, const std::map<K, V> &v, context &ctx) {
                 size_t index = 0;
                 bool is_value = false;
-                auto g = ctx.guard<true, false>([&] {
+                auto g = ctx.guard<true, false, false>([&] {
                     return errors::value_frame{
                         "std::map", p_str(), detail::concat(is_value ? "Value " : "Key ", index)
                     };
@@ -2043,7 +2099,7 @@ namespace bsp {
             static void read(io::Reader auto &r, std::map<K, V> &out, context &ctx) {
                 size_t index = 0;
                 [[maybe_unused]] bool is_value = false;
-                auto g = ctx.guard<true, false>([&] {
+                auto g = ctx.guard<true, false, false>([&] {
                     return errors::value_frame{
                         "std::map", p_str(), detail::concat(is_value ? "Value " : "Key ", index)
                     };
@@ -2058,7 +2114,7 @@ namespace bsp {
                     V value;
                     DefaultSerializer<V>::read(r, value, ctx);
 
-                    if (ctx.opt.policy <= errors::error_policy::STRICT)
+                    if (ctx.sf.policy <= errors::error_policy::STRICT)
                         if (out.contains(key))
                             throw errors::make(errors::code::duplicate_key, ctx,
                                                std::string("duplicate key in std::map"));
@@ -2076,7 +2132,7 @@ namespace bsp {
             static void write(io::Writer auto &w, const std::unordered_map<K, V> &v, context &ctx) {
                 size_t index = 0;
                 bool is_value = false;
-                auto g = ctx.guard<true, false>([&] {
+                auto g = ctx.guard<true, false, false>([&] {
                     return errors::value_frame{
                         "std::unordered_map", "Varint", detail::concat(is_value ? "Value " : "Key ", index),
                         detail::concat("length=", v.size())
@@ -2097,16 +2153,16 @@ namespace bsp {
                 size_t index = 0;
                 size_t size = 0;
                 [[maybe_unused]] bool is_value = false;
-                auto g = ctx.guard<true, false>([&] {
+                auto g = ctx.guard<true, false, false>([&] {
                     return errors::value_frame{
                         "std::unordered_map", "Varint", detail::concat(is_value ? "Value " : "Key ", index),
                         detail::concat("length=", size)
                     };
                 });
 
-                size = detail::read_varint<size_t>(r, ctx.opt.policy <= errors::error_policy::MEDIUM);
-                if (ctx.opt.policy <= errors::error_policy::MEDIUM)
-                    if (size > ctx.opt.max_container_size) throw errors::container_too_large(size, ctx);
+                size = detail::read_varint<size_t>(r, ctx.sf.policy <= errors::error_policy::MEDIUM);
+                if (ctx.sf.policy <= errors::error_policy::MEDIUM)
+                    if (size > ctx.sf.max_container_size) throw errors::container_too_large(size, ctx);
 
                 out.clear();
                 for (; index < size; ++index) {
@@ -2117,7 +2173,7 @@ namespace bsp {
                     V value;
                     DefaultSerializer<V>::read(r, value, ctx);
 
-                    if (ctx.opt.policy <= errors::error_policy::STRICT)
+                    if (ctx.sf.policy <= errors::error_policy::STRICT)
                         if (out.contains(key))
                             throw errors::make(errors::code::duplicate_key, ctx,
                                                std::string("duplicate key in std::unordered_map"));
@@ -2136,7 +2192,7 @@ namespace bsp {
             static void write(io::Writer auto &w, const std::unordered_map<K, V> &v, context &ctx) {
                 size_t index = 0;
                 bool is_value = false;
-                auto g = ctx.guard<true, false>([&] {
+                auto g = ctx.guard<true, false, false>([&] {
                     return errors::value_frame{
                         "std::unordered_map", p_str(), detail::concat(is_value ? "Value " : "Key ", index)
                     };
@@ -2155,7 +2211,7 @@ namespace bsp {
             static void read(io::Reader auto &r, std::unordered_map<K, V> &out, context &ctx) {
                 size_t index = 0;
                 [[maybe_unused]] bool is_value = false;
-                auto g = ctx.guard<true, false>([&] {
+                auto g = ctx.guard<true, false, false>([&] {
                     return errors::value_frame{
                         "std::unordered_map", p_str(), detail::concat(is_value ? "Value " : "Key ", index)
                     };
@@ -2170,7 +2226,7 @@ namespace bsp {
                     V value;
                     DefaultSerializer<V>::read(r, value, ctx);
 
-                    if (ctx.opt.policy <= errors::error_policy::STRICT)
+                    if (ctx.sf.policy <= errors::error_policy::STRICT)
                         if (out.contains(key))
                             throw errors::make(errors::code::duplicate_key, ctx,
                                                std::string("duplicate key in std::unordered_map"));
@@ -2186,7 +2242,7 @@ namespace bsp {
         struct Serializer<std::set<T>, proto::Varint> {
             static void write(io::Writer auto &w, const std::set<T> &v, context &ctx) {
                 size_t index = 0;
-                auto g = ctx.guard<true, false>([&] {
+                auto g = ctx.guard<true, false, false>([&] {
                     return errors::value_frame{
                         "std::set", "Varint", detail::concat("Elem ", index),
                         detail::concat("length=", v.size())
@@ -2203,16 +2259,16 @@ namespace bsp {
             static void read(io::Reader auto &r, std::set<T> &out, context &ctx) {
                 size_t index = 0;
                 size_t size = 0;
-                auto g = ctx.guard<true, false>([&] {
+                auto g = ctx.guard<true, false, false>([&] {
                     return errors::value_frame{
                         "std::set", "Varint", detail::concat("Elem ", index),
                         detail::concat("length=", size)
                     };
                 });
 
-                size = detail::read_varint<size_t>(r, ctx.opt.policy <= errors::error_policy::MEDIUM);
-                if (ctx.opt.policy <= errors::error_policy::MEDIUM)
-                    if (size > ctx.opt.max_container_size) throw errors::container_too_large(size, ctx);
+                size = detail::read_varint<size_t>(r, ctx.sf.policy <= errors::error_policy::MEDIUM);
+                if (ctx.sf.policy <= errors::error_policy::MEDIUM)
+                    if (size > ctx.sf.max_container_size) throw errors::container_too_large(size, ctx);
 
                 out.clear();
                 for (; index < size; ++index) {
@@ -2229,7 +2285,7 @@ namespace bsp {
         struct Serializer<std::unordered_set<T>, proto::Varint> {
             static void write(io::Writer auto &w, const std::unordered_set<T> &v, context &ctx) {
                 size_t index = 0;
-                auto g = ctx.guard<true, false>([&] {
+                auto g = ctx.guard<true, false, false>([&] {
                     return errors::value_frame{
                         "std::unordered_set", "Varint", detail::concat("Elem ", index),
                         detail::concat("length=", v.size())
@@ -2246,16 +2302,16 @@ namespace bsp {
             static void read(io::Reader auto &r, std::unordered_set<T> &out, context &ctx) {
                 size_t index = 0;
                 size_t size = 0;
-                auto g = ctx.guard<true, false>([&] {
+                auto g = ctx.guard<true, false, false>([&] {
                     return errors::value_frame{
                         "std::unordered_set", "Varint", detail::concat("Elem ", index),
                         detail::concat("length=", size)
                     };
                 });
 
-                size = detail::read_varint<size_t>(r, ctx.opt.policy <= errors::error_policy::MEDIUM);
-                if (ctx.opt.policy <= errors::error_policy::MEDIUM)
-                    if (size > ctx.opt.max_container_size) throw errors::container_too_large(size, ctx);
+                size = detail::read_varint<size_t>(r, ctx.sf.policy <= errors::error_policy::MEDIUM);
+                if (ctx.sf.policy <= errors::error_policy::MEDIUM)
+                    if (size > ctx.sf.max_container_size) throw errors::container_too_large(size, ctx);
 
                 out.clear();
                 for (; index < size; ++index) {
@@ -2274,7 +2330,7 @@ namespace bsp {
 
             static void write(io::Writer auto &w, const std::array<T, N> &v, context &ctx) {
                 size_t index = 0;
-                auto g = ctx.guard<true, false>([&] {
+                auto g = ctx.guard<true, false, false>([&] {
                     return errors::value_frame{
                         t_str(), "Fixed<>", detail::concat("Elem ", index)
                     };
@@ -2287,7 +2343,7 @@ namespace bsp {
 
             static void read(io::Reader auto &r, std::array<T, N> &out, context &ctx) {
                 size_t index = 0;
-                auto g = ctx.guard<true, false>([&] {
+                auto g = ctx.guard<true, false, false>([&] {
                     return errors::value_frame{
                         t_str(), "Fixed<>", detail::concat("Elem ", index)
                     };
@@ -2309,7 +2365,7 @@ namespace bsp {
         struct Serializer<std::pair<T1, T2>, proto::Fixed<> > {
             static void write(io::Writer auto &w, const std::pair<T1, T2> &v, context &ctx) {
                 [[maybe_unused]] bool is_second = false;
-                auto g = ctx.guard<true, false>([&] {
+                auto g = ctx.guard<true, false, false>([&] {
                     return errors::value_frame{"std::pair", "Fixed<>", (is_second ? "Second" : "First")};
                 });
 
@@ -2320,7 +2376,7 @@ namespace bsp {
 
             static void read(io::Reader auto &r, std::pair<T1, T2> &out, context &ctx) {
                 [[maybe_unused]] bool is_second = false;
-                auto g = ctx.guard<true, false>([&] {
+                auto g = ctx.guard<true, false, false>([&] {
                     return errors::value_frame{"std::pair", "Fixed<>", (is_second ? "Second" : "First")};
                 });
 
@@ -2336,7 +2392,7 @@ namespace bsp {
         struct Serializer<std::tuple<Ts...>, proto::Fixed<> > {
             static void write(io::Writer auto &w, const std::tuple<Ts...> &v, context &ctx) {
                 [[maybe_unused]] size_t field_index = 0;
-                auto g = ctx.guard<true, false>([&] {
+                auto g = ctx.guard<true, false, false>([&] {
                     return errors::value_frame{
                         "std::tuple", "Fixed<>", detail::concat("Field ", field_index)
                     };
@@ -2350,7 +2406,7 @@ namespace bsp {
 
             static void read(io::Reader auto &r, std::tuple<Ts...> &out, context &ctx) {
                 [[maybe_unused]] size_t field_index = 0;
-                auto g = ctx.guard<true, false>([&] {
+                auto g = ctx.guard<true, false, false>([&] {
                     return errors::value_frame{
                         "std::tuple", "Fixed<>", detail::concat("Field ", field_index)
                     };
@@ -2448,7 +2504,7 @@ namespace bsp {
         struct Serializer<std::optional<T>, proto::Varint> {
             static void write(io::Writer auto &w, const std::optional<T> &v, context &ctx) {
                 const bool has = v.has_value();
-                auto g = ctx.guard<false, false>([] { return errors::wrapper_frame("std::optional"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::wrapper_frame("std::optional"); });
 
                 w.write_byte(static_cast<uint8_t>(has));
                 if (has) {
@@ -2458,10 +2514,10 @@ namespace bsp {
 
             static void read(io::Reader auto &r, std::optional<T> &out, context &ctx) {
                 bool has = false;
-                auto g = ctx.guard<false, false>([] { return errors::wrapper_frame("std::optional"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::wrapper_frame("std::optional"); });
 
                 const uint8_t has_byte = r.read_byte();
-                if (ctx.opt.policy <= errors::error_policy::STRICT && has_byte > 1)
+                if (ctx.sf.policy <= errors::error_policy::STRICT && has_byte > 1)
                     throw errors::invalid_bool(has_byte, ctx);
                 has = static_cast<bool>(has_byte);
 
@@ -2481,7 +2537,7 @@ namespace bsp {
         struct Serializer<std::variant<Ts...>, proto::Varint> {
             static void write(io::Writer auto &w, const std::variant<Ts...> &v, context &ctx) {
                 const size_t which = v.index();
-                auto g = ctx.guard<false, false>([&] {
+                auto g = ctx.guard<false, false, false>([&] {
                     return errors::wrapper_frame{
                         detail::concat("std::variant (index=", which, ")")
                     };
@@ -2498,13 +2554,13 @@ namespace bsp {
             static void read(io::Reader auto &r, std::variant<Ts...> &out, context &ctx) {
                 size_t which = SIZE_MAX;
 
-                auto g = ctx.guard<false, false>([&] {
+                auto g = ctx.guard<false, false, false>([&] {
                     return errors::wrapper_frame{
                         detail::concat("std::variant (index=", which, ")")
                     };
                 });
 
-                which = detail::read_varint<size_t>(r, ctx.opt.policy <= errors::error_policy::MEDIUM);
+                which = detail::read_varint<size_t>(r, ctx.sf.policy <= errors::error_policy::MEDIUM);
 
                 if (which >= sizeof...(Ts))
                     throw errors::make(errors::code::invalid_index, ctx,
@@ -2539,12 +2595,12 @@ namespace bsp {
                       types::serializable<T, ProtocolT>)
         struct Serializer<types::PVal<T, ProtocolT>, Protocol> {
             static void write(io::Writer auto &w, const types::PVal<T, ProtocolT> &v, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::wrapper_frame("PVal"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::wrapper_frame("PVal"); });
                 Serializer<T, ProtocolT>::write(w, v.value, ctx);
             }
 
             static void read(io::Reader auto &r, types::PVal<T, ProtocolT> &v, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::wrapper_frame("PVal"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::wrapper_frame("PVal"); });
                 Serializer<T, ProtocolT>::read(r, v.value, ctx);
             }
         };
@@ -2552,25 +2608,25 @@ namespace bsp {
         // types::CVal
         // [Unknown in compile-time, defined in CVal]
         template<typename T> requires std::is_base_of_v<types::CVal, T>
-        struct Serializer<T, proto::CVal> {
+        struct Serializer<T, proto::Custom> {
             static void write(io::AnyWriter &w, const T &v, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame("CVal", "CVal"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame("CVal", "CVal"); });
                 v.write(w, ctx);
             }
 
             static void write(io::Writer auto &w, const T &v, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame("CVal", "CVal"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame("CVal", "CVal"); });
                 io::AnyWriter any_w(w);
                 v.write(any_w, ctx);
             }
 
             static void read(io::AnyReader &r, T &out, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame("CVal", "CVal"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame("CVal", "CVal"); });
                 out.read(r, ctx);
             }
 
             static void read(io::Reader auto &r, T &out, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame("CVal", "CVal"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame("CVal", "CVal"); });
                 io::AnyReader any_r(r);
                 out.read(any_r, ctx);
             }
@@ -2581,15 +2637,15 @@ namespace bsp {
         // 平凡可复制类型的序列化器
         template<typename T> requires types::trivial_serializable<T>
         struct Serializer<T, proto::Trivial> {
-            static constexpr const char *t_str = detail::literal_name<T>();
+            static constexpr const char *t_str = detail::type_name_of<T>();
 
             static void write(io::Writer auto &w, const T &v, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame(t_str, "Trivial"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame(t_str, "Trivial"); });
                 w.write_bytes(reinterpret_cast<const uint8_t *>(&v), sizeof(T));
             }
 
             static void read(io::Reader auto &r, T &out, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame(t_str, "Trivial"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame(t_str, "Trivial"); });
                 r.read_bytes(reinterpret_cast<uint8_t *>(&out), sizeof(T));
             }
         };
@@ -2597,7 +2653,7 @@ namespace bsp {
         template<typename T> requires types::trivial_serializable<T>
         struct Serializer<std::vector<T>, proto::Trivial> {
             static void write(io::Writer auto &w, const std::vector<T> &v, context &ctx) {
-                auto g = ctx.guard<false, false>([&] {
+                auto g = ctx.guard<false, false, false>([&] {
                     return errors::value_frame{
                         "std::vector", "Trivial", std::nullopt,
                         detail::concat("length=", v.size())
@@ -2609,15 +2665,15 @@ namespace bsp {
 
             static void read(io::Reader auto &r, std::vector<T> &out, context &ctx) {
                 size_t size = 0;
-                auto g = ctx.guard<false, false>([&] {
+                auto g = ctx.guard<false, false, false>([&] {
                     return errors::value_frame{
                         "std::vector", "Trivial", std::nullopt,
                         detail::concat("length=", size)
                     };
                 });
-                size = detail::read_varint<size_t>(r, ctx.opt.policy <= errors::error_policy::MEDIUM);
-                if (ctx.opt.policy <= errors::error_policy::MEDIUM)
-                    if (size > ctx.opt.max_container_size) throw errors::container_too_large(size, ctx);
+                size = detail::read_varint<size_t>(r, ctx.sf.policy <= errors::error_policy::MEDIUM);
+                if (ctx.sf.policy <= errors::error_policy::MEDIUM)
+                    if (size > ctx.sf.max_container_size) throw errors::container_too_large(size, ctx);
 
                 out.resize(size);
                 r.read_bytes(reinterpret_cast<uint8_t *>(out.data()), size * sizeof(T));
@@ -2629,7 +2685,7 @@ namespace bsp {
         template<>
         struct Serializer<std::vector<bool>, proto::Trivial> {
             static void write(io::Writer auto &w, const std::vector<bool> &v, context &ctx) {
-                auto g = ctx.guard<false, false>([&] {
+                auto g = ctx.guard<false, false, false>([&] {
                     return errors::value_frame{
                         "std::vector<bool>", "Trivial", std::nullopt,
                         detail::concat("bit count=", v.size())
@@ -2650,15 +2706,15 @@ namespace bsp {
 
             static void read(io::Reader auto &r, std::vector<bool> &out, context &ctx) {
                 size_t bit_size = 0;
-                auto g = ctx.guard<false, false>([&] {
+                auto g = ctx.guard<false, false, false>([&] {
                     return errors::value_frame{
                         "std::vector<bool>", "Trivial", std::nullopt,
                         detail::concat("bit count=", bit_size)
                     };
                 });
-                bit_size = detail::read_varint<size_t>(r, ctx.opt.policy <= errors::error_policy::MEDIUM);
-                if (ctx.opt.policy <= errors::error_policy::MEDIUM)
-                    if (bit_size > ctx.opt.max_container_size) throw errors::container_too_large(bit_size, ctx);
+                bit_size = detail::read_varint<size_t>(r, ctx.sf.policy <= errors::error_policy::MEDIUM);
+                if (ctx.sf.policy <= errors::error_policy::MEDIUM)
+                    if (bit_size > ctx.sf.max_container_size) throw errors::container_too_large(bit_size, ctx);
 
                 out.resize(bit_size);
                 const size_t byte_count = (bit_size + 7) / 8;
@@ -2678,12 +2734,12 @@ namespace bsp {
             }
 
             static void write(io::Writer auto &w, const std::array<T, N> &v, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame(t_str(), "Trivial"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame(t_str(), "Trivial"); });
                 w.write_bytes(reinterpret_cast<const uint8_t *>(v.data()), N * sizeof(T));
             }
 
             static void read(io::Reader auto &r, std::array<T, N> &out, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::value_frame(t_str(), "Trivial"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::value_frame(t_str(), "Trivial"); });
                 r.read_bytes(reinterpret_cast<uint8_t *>(out.data()), N * sizeof(T));
             }
         };
@@ -2694,7 +2750,7 @@ namespace bsp {
         template<typename T> requires types::default_serializable<T>
         struct Serializer<T *, proto::Varint> {
             static void write(io::Writer auto &w, const T *const &v, context &ctx) {
-                auto g = ctx.guard<true, false>([] { return errors::wrapper_frame("ptr"); });
+                auto g = ctx.guard<true, false, false>([] { return errors::wrapper_frame("ptr"); });
 
                 const bool non_null = v != nullptr;
                 w.write_byte(static_cast<uint8_t>(non_null));
@@ -2705,18 +2761,18 @@ namespace bsp {
             }
 
             static void read(io::Reader auto &r, T *&out, context &ctx) {
-                auto g = ctx.guard<true, false>([] { return errors::wrapper_frame("ptr"); });
+                auto g = ctx.guard<true, false, false>([] { return errors::wrapper_frame("ptr"); });
 
                 const uint8_t non_null_byte = r.read_byte();
-                if (ctx.opt.policy <= errors::error_policy::STRICT && non_null_byte > 1)
+                if (ctx.sf.policy <= errors::error_policy::STRICT && non_null_byte > 1)
                     throw errors::invalid_bool(non_null_byte, ctx);
                 const bool non_null = static_cast<bool>(non_null_byte);
 
+                delete out;
                 if (non_null) {
                     out = new T{};
                     DefaultSerializer<T>::read(r, *out, ctx);
                 } else {
-                    delete out;
                     out = nullptr;
                 }
             }
@@ -2725,7 +2781,7 @@ namespace bsp {
         template<typename T> requires types::default_serializable<T>
         struct Serializer<std::unique_ptr<T>, proto::Varint> {
             static void write(io::Writer auto &w, const std::unique_ptr<T> &v, context &ctx) {
-                auto g = ctx.guard<true, false>([] { return errors::wrapper_frame("std::unique_ptr"); });
+                auto g = ctx.guard<true, false, false>([] { return errors::wrapper_frame("std::unique_ptr"); });
 
                 const bool non_null = v != nullptr;
                 w.write_byte(static_cast<uint8_t>(non_null));
@@ -2736,10 +2792,10 @@ namespace bsp {
             }
 
             static void read(io::Reader auto &r, std::unique_ptr<T> &out, context &ctx) {
-                auto g = ctx.guard<true, false>([] { return errors::wrapper_frame("std::unique_ptr"); });
+                auto g = ctx.guard<true, false, false>([] { return errors::wrapper_frame("std::unique_ptr"); });
 
                 const uint8_t non_null_byte = r.read_byte();
-                if (ctx.opt.policy <= errors::error_policy::STRICT && non_null_byte > 1)
+                if (ctx.sf.policy <= errors::error_policy::STRICT && non_null_byte > 1)
                     throw errors::invalid_bool(non_null_byte, ctx);
                 const bool non_null = static_cast<bool>(non_null_byte);
 
@@ -2758,7 +2814,7 @@ namespace bsp {
 
         // --- Default Fallback ------------------------------------------------
         // 默认协议映射
-        template<typename T>
+        template<typename T> requires (!std::is_same_v<T, proto::Default> && types::default_serializable<T>)
         struct Serializer<T, proto::Default> {
             static void write(io::Writer auto &w, const T &v, context &ctx) {
                 DefaultSerializer<T>::write(w, v, ctx);
@@ -2778,7 +2834,7 @@ namespace bsp {
         template<typename T, typename Inner> requires types::serializable<T, Inner>
         struct Serializer<T, proto::Limited<proto::Varint, Inner> > {
             static void write(io::Writer auto &w, const T &v, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::wrapper_frame("Limited<Varint>"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::wrapper_frame("Limited<Varint>"); });
 
                 // Write to temporary buffer to know the size
                 io::BufferWriter tmp;
@@ -2790,11 +2846,11 @@ namespace bsp {
 
             static void read(io::Reader auto &r, T &out, context &ctx) {
                 size_t len = 0;
-                auto g = ctx.guard<false, false>([&] {
+                auto g = ctx.guard<false, false, false>([&] {
                     return errors::wrapper_frame{detail::concat("Limited<Varint> size=", len)};
                 });
 
-                len = detail::read_varint<size_t>(r, ctx.opt.policy <= errors::error_policy::MEDIUM);
+                len = detail::read_varint<size_t>(r, ctx.sf.policy <= errors::error_policy::MEDIUM);
                 io::LimitedReader limited_r(r, len);
                 Serializer<T, Inner>::read(limited_r, out, ctx);
             }
@@ -2806,7 +2862,7 @@ namespace bsp {
             static std::string p_str() { return detail::concat("Limited<Fixed<", N, ">>"); }
 
             static void write(io::Writer auto &w, const T &v, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::wrapper_frame(p_str()); });
+                auto g = ctx.guard<false, false, false>([] { return errors::wrapper_frame(p_str()); });
 
                 io::BufferWriter tmp;
                 Serializer<T, Inner>::write(tmp, v, ctx);
@@ -2814,14 +2870,13 @@ namespace bsp {
                 if (tmp.buf.size() > N)
                     throw errors::fixed_size_mismatch(N, tmp.buf.size(), ctx);
 
-                detail::write_varint(w, tmp.buf.size());
                 w.write_bytes(tmp.buf.data(), tmp.buf.size());
             }
 
             static void read(io::Reader auto &r, T &out, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::wrapper_frame(p_str()); });
+                auto g = ctx.guard<false, false, false>([] { return errors::wrapper_frame(p_str()); });
 
-                const size_t len = detail::read_varint<size_t>(r, ctx.opt.policy <= errors::error_policy::MEDIUM);
+                const size_t len = detail::read_varint<size_t>(r, ctx.sf.policy <= errors::error_policy::MEDIUM);
                 if (len > N)
                     throw errors::fixed_size_mismatch(N, len, ctx);
 
@@ -2836,7 +2891,7 @@ namespace bsp {
         template<typename T, typename Inner> requires types::serializable<T, Inner>
         struct Serializer<T, proto::Forced<proto::Varint, Inner> > {
             static void write(io::Writer auto &w, const T &v, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::wrapper_frame("Forced<Varint>"); });
+                auto g = ctx.guard<false, false, false>([] { return errors::wrapper_frame("Forced<Varint>"); });
 
                 // Write to temp buffer, then declare the length
                 io::BufferWriter tmp;
@@ -2848,13 +2903,15 @@ namespace bsp {
 
             static void read(io::Reader auto &r, T &out, context &ctx) {
                 size_t len = 0;
-                auto g = ctx.guard<false, false>([&] {
+                io::LimitedReader limited_r(r, 0);
+                auto g = ctx.guard<false, false, false>([&] {
+                    limited_r.skip_remaining();
                     return errors::wrapper_frame{detail::concat("Limited<Varint> size=", len)};
                 });
 
-                len = detail::read_varint<size_t>(r, ctx.opt.policy <= errors::error_policy::MEDIUM);
+                len = detail::read_varint<size_t>(r, ctx.sf.policy <= errors::error_policy::MEDIUM);
 
-                io::LimitedReader limited_r(r, len);
+                limited_r.remaining = len;
                 Serializer<T, Inner>::read(limited_r, out, ctx);
                 limited_r.skip_remaining();
             }
@@ -2866,7 +2923,7 @@ namespace bsp {
             static std::string p_str() { return detail::concat("Forced<Fixed<", N, ">>"); }
 
             static void write(io::Writer auto &w, const T &v, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::wrapper_frame(p_str()); });
+                auto g = ctx.guard<false, false, false>([] { return errors::wrapper_frame(p_str()); });
 
                 io::LimitedWriter limited_w(w, N);
                 Serializer<T, Inner>::write(limited_w, v, ctx);
@@ -2874,9 +2931,12 @@ namespace bsp {
             }
 
             static void read(io::Reader auto &r, T &out, context &ctx) {
-                auto g = ctx.guard<false, false>([] { return errors::wrapper_frame(p_str()); });
-
                 io::LimitedReader limited_r(r, N);
+                auto g = ctx.guard<false, false, false>([&] {
+                    limited_r.skip_remaining();
+                    return errors::wrapper_frame(p_str());
+                });
+
                 Serializer<T, Inner>::read(limited_r, out, ctx);
                 limited_r.skip_remaining();
             }
@@ -2888,11 +2948,11 @@ namespace bsp {
         template<typename T, typename P> requires types::internal_serializable<T, P>
         struct Serializer<T, P> {
             static void write(io::Writer auto &w, const T &v, context &ctx) {
-                T::write(w, v, ctx);
+                T::write(w, v, ctx, P{});
             }
 
             static void read(io::Reader auto &r, T &out, context &ctx) {
-                T::read(r, out, ctx);
+                T::read(r, out, ctx, P{});
             }
         };
     }
@@ -2931,10 +2991,17 @@ namespace bsp {
         serialize::Serializer<T, Proto>::read(r, out, ctx);
     }
 
-    template<typename Proto = proto::Default, typename T> requires types::serializable<T, Proto>
+    template<typename T, typename Proto = proto::Default> requires types::serializable<T, Proto>
     [[nodiscard]] T read(io::Reader auto &r) {
         T out{};
         auto ctx = context::get_default_context();
+        serialize::Serializer<T, Proto>::read(r, out, ctx);
+        return out;
+    }
+
+    template<typename Proto = proto::Default, typename T> requires types::serializable<T, Proto>
+    [[nodiscard]] T read(io::Reader auto &r, context& ctx) {
+        T out{};
         serialize::Serializer<T, Proto>::read(r, out, ctx);
         return out;
     }
@@ -2984,12 +3051,6 @@ namespace bsp {
                                                                                                     \
                 static_assert(schema_count != 0, "there must be at least 1 schema in SchemaSet");   \
                 static_assert(validate_schemas(schemas), "schema versions must ascend");            \
-            };                                                                                      \
-        }                                                                                           \
-        namespace proto {                                                                           \
-            template<>                                                                              \
-            struct DefaultProtocol<T> {                                                             \
-                using type = Schema<SIZE_MAX>;                                                      \
             };                                                                                      \
         }                                                                                           \
     }
