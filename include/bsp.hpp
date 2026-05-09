@@ -1432,19 +1432,22 @@ namespace bsp {
         // --- Trivial Types ---------------------------------------------------
         // 平凡类型
         template<typename T>
-            requires (types::trivial_serializable<T> && (sizeof(T) == 1) && !std::integral<T>)
+            requires (types::trivial_serializable<T> && (sizeof(T) == 1) && !std::integral<T> &&
+                      !types::serializable<T, Custom>)
         struct DefaultProtocol<T> {
             using type = Trivial;
         };
 
         template<typename T>
-            requires (types::trivial_serializable<T> && (sizeof(T) == 1) && !std::integral<T>)
+            requires (types::trivial_serializable<T> && (sizeof(T) == 1) && !std::integral<T> &&
+                      !types::serializable<T, Custom>)
         struct DefaultProtocol<std::vector<T> > {
             using type = Trivial;
         };
 
         template<typename T, size_t N>
-            requires (types::trivial_serializable<T> && (sizeof(T) == 1) && !std::integral<T>)
+            requires (types::trivial_serializable<T> && (sizeof(T) == 1) && !std::integral<T> &&
+                      !types::serializable<T, Custom>)
         struct DefaultProtocol<std::array<T, N> > {
             using type = Trivial;
         };
@@ -3000,7 +3003,7 @@ namespace bsp {
     }
 
     template<typename Proto = proto::Default, typename T> requires types::serializable<T, Proto>
-    [[nodiscard]] T read(io::Reader auto &r, context& ctx) {
+    [[nodiscard]] T read(io::Reader auto &r, context &ctx) {
         T out{};
         serialize::Serializer<T, Proto>::read(r, out, ctx);
         return out;
